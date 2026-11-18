@@ -257,7 +257,7 @@ import {
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
-import { SidebarProjectStrip } from "./sidebar/SidebarProjectStrip";
+import { PROJECT_STRIP_DRAG_TYPE, SidebarProjectStrip } from "./sidebar/SidebarProjectStrip";
 import { TooltipProvider } from "./ui/tooltip";
 import {
   composerDraftHasUserContent,
@@ -3139,6 +3139,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             data-selected={undefined}
                             onContextMenu={(event) => {
                               if (project) handleProjectSettings(event, project);
+                            }}
+                            // Dragged onto the project icons row, it pins the project there; the
+                            // list closes once the drag starts so the row is free to drop on.
+                            draggable={project !== null}
+                            onDragStart={(event) => {
+                              if (!project) return;
+                              event.dataTransfer.setData(
+                                PROJECT_STRIP_DRAG_TYPE,
+                                project.projectKey,
+                              );
+                              event.dataTransfer.effectAllowed = "move";
+                              window.setTimeout(() =>
+                                dispatchProjectScopeMenu({ type: "open-changed", open: false }),
+                              );
                             }}
                           >
                             <ProjectScopeRowIcon isSelected={isSelected}>
