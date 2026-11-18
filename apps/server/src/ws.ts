@@ -1513,13 +1513,26 @@ export const layerWsRpc = (
       // messages. The first open waits a moment so they arrive with the snapshot; a
       // long read finishes in the background and streams in. Tried once per 5 minutes.
       const claudeHistoryTriedAt = new Map<ThreadId, number>();
+      const claudeCatchUpAt = new Map<ThreadId, number>();
       const loadClaudeHistoryOnOpen = Effect.fn("ws.loadClaudeHistoryOnOpen")(
         function* (threadId: ThreadId) {
           const now = yield* Clock.currentTimeMillis;
-          if (now - (claudeHistoryTriedAt.get(threadId) ?? 0) < 5 * 60_000) return;
           const shell = yield* threadManagement.getThreadShell(threadId);
+          if (shell === null) return;
+          // History already imported: bring in what the session said since, in another app.
+          // The shell does not carry historyOrigin, so the importer checks it on the records.
+          if (now - (claudeCatchUpAt.get(threadId) ?? 0) >= 60_000) {
+            if (claudeCatchUpAt.size >= 2000) claudeCatchUpAt.clear();
+            claudeCatchUpAt.set(threadId, now);
+            yield* agentSessionImporter.catchUpClaudeTranscript({ threadId }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Could not catch up a Claude session", { threadId, cause }),
+              ),
+              Effect.forkDetach,
+            );
+          }
+          if (now - (claudeHistoryTriedAt.get(threadId) ?? 0) < 5 * 60_000) return;
           if (
-            shell === null ||
             !AgentSessionImporter.isNativeHistoryPending({
               historyOrigin: shell.historyOrigin,
               hasRun: shell.latestRunId !== null,

@@ -220,6 +220,8 @@ export interface AgentSessionThread {
   readonly updatedAt: string;
   readonly messages: ReadonlyArray<AgentSessionThreadMessage>;
   readonly omittedMessageCount: number;
+  /** The transcript file read, for a Claude session's history. */
+  readonly transcriptPath?: string;
 }
 
 export type AgentSessionRecentThread =
@@ -2386,7 +2388,9 @@ export const make = Effect.gen(function* () {
         snapshot.claudeFields,
         snapshot.droppedMessageCount,
       );
-      return thread === "empty" ? null : thread;
+      return thread === "empty" || thread === null
+        ? null
+        : { ...thread, transcriptPath: copy.filePath };
     },
     (effect, input) =>
       effect.pipe(

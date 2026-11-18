@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - pictures are read line by line from a transcript that can be gigabytes.
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -14,8 +15,10 @@ import {
   ProviderDriverKind,
   ThreadId,
   TurnItemId,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type AgentSessionImportInput,
   type AgentSessionImportResult,
+  type ChatImageAttachment,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
@@ -42,6 +45,15 @@ import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.t
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 import * as ProjectService from "./ProjectService.ts";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
+import {
+  chatAttachmentStableKey,
+  createDeterministicAttachmentId,
+  resolveAttachmentPath,
+} from "../attachmentStore.ts";
+import * as ServerConfig from "../config.ts";
 
 const isProjectionStoreThreadNotFoundError = Schema.is(
   ProjectionStore.ProjectionStoreThreadNotFoundError,
@@ -50,6 +62,11 @@ const isProjectionStoreThreadNotFoundError = Schema.is(
 const IMPORT_EVENT_PREFIX = "agent-session-import:v2";
 const CLAUDE_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+class AgentSessionPictureReadError extends Schema.TaggedError<AgentSessionPictureReadError>()(
+  "AgentSessionPictureReadError",
+  { message: Schema.String },
+) {}
 
 class AgentSessionUnresumableSessionError extends Schema.TaggedError<AgentSessionUnresumableSessionError>()(
   "AgentSessionUnresumableSessionError",
@@ -113,9 +130,14 @@ function messageEvents(input: {
   readonly threadId: ThreadId;
   readonly index: number;
   readonly message: HistoryMessage;
+  /** Catch-up items take ids and places after what the thread already shows. */
+  readonly suffix?: string;
+  readonly ordinal?: number;
+  readonly attachments?: ReadonlyArray<ChatImageAttachment>;
 }): ReadonlyArray<OrchestrationV2DomainEvent> {
-  const ordinal = input.index + 1;
-  const suffix = String(input.index).padStart(6, "0");
+  const ordinal = input.ordinal ?? input.index + 1;
+  const suffix = input.suffix ?? historySuffix(input.index);
+  const attachments = input.message.role === "user" ? (input.attachments ?? []) : [];
   const messageId = MessageId.make(`${input.threadId}:${suffix}`);
   const turnItemId = TurnItemId.make(
     `${IMPORT_EVENT_PREFIX}:turn-item:${input.threadId}:${suffix}`,
@@ -158,7 +180,7 @@ function messageEvents(input: {
     nodeId: null,
     role: input.message.role,
     text: input.message.text,
-    attachments: [],
+    attachments,
     streaming: false,
     createdAt: at,
     updatedAt: at,
@@ -173,7 +195,7 @@ function messageEvents(input: {
           messageId,
           inputIntent: "turn_start",
           text: input.message.text,
-          attachments: [],
+          attachments,
         }
       : {
           ...common,
@@ -193,6 +215,129 @@ function messageEvents(input: {
     turnItemEvent(turnItem),
   ];
 }
+
+const historySuffix = (index: number) => String(index).padStart(6, "0");
+
+const timeKey = (value: string) =>
+  Option.match(DateTime.make(value), {
+    onNone: () => value,
+    onSome: (time) => DateTime.formatIso(time),
+  });
+
+/**
+ * Pictures pasted into the transcript's user records, by record time. T3's transcript
+ * reader leaves picture data out (it would blow its memory budget), so this reads the
+ * file line by line and parses only user records that carry a picture.
+ */
+async function readTranscriptPictures(
+  filePath: string,
+  wanted: ReadonlySet<string>,
+): Promise<Map<string, Array<{ readonly mimeType: string; readonly data: string }>>> {
+  const found = new Map<string, Array<{ readonly mimeType: string; readonly data: string }>>();
+  if (wanted.size === 0) return found;
+  const lines = NodeReadline.createInterface({
+    input: NodeFS.createReadStream(filePath),
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
+    if (!line.includes('"type":"image"') || !line.includes('"type":"user"')) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof record !== "object" || record === null) continue;
+    const { type, timestamp, message } = record as {
+      type?: unknown;
+      timestamp?: unknown;
+      message?: { content?: unknown };
+    };
+    if (type !== "user" || typeof timestamp !== "string") continue;
+    const key = timeKey(timestamp);
+    if (!wanted.has(key) || !Array.isArray(message?.content)) continue;
+    const pictures = message.content.flatMap((block: unknown) => {
+      const source = (block as { type?: unknown; source?: Record<string, unknown> } | null)
+        ?.source;
+      return (block as { type?: unknown } | null)?.type === "image" &&
+        source?.type === "base64" &&
+        typeof source.media_type === "string" &&
+        /^image\//i.test(source.media_type) &&
+        typeof source.data === "string" &&
+        source.data.length > 0
+        ? [{ mimeType: source.media_type.toLowerCase(), data: source.data }]
+        : [];
+    });
+    if (pictures.length > 0) found.set(key, pictures);
+  }
+  return found;
+}
+
+/** Saves the pictures of these history messages as T3 attachments, keyed by message suffix. */
+const historyPictures = Effect.fn("AgentSessionImporter.historyPictures")(function* (input: {
+  readonly threadId: ThreadId;
+  readonly transcriptPath: string | undefined;
+  readonly items: ReadonlyArray<{ readonly message: HistoryMessage; readonly suffix: string }>;
+}) {
+  const byItem = new Map<string, ReadonlyArray<ChatImageAttachment>>();
+  const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+  const transcriptPath = input.transcriptPath;
+  if (Option.isNone(config) || transcriptPath === undefined) return byItem;
+  const users = input.items.filter((item) => item.message.role === "user");
+  const pictures = yield* Effect.tryPromise({
+    try: () =>
+      readTranscriptPictures(
+        transcriptPath,
+        new Set(users.map((item) => timeKey(item.message.createdAt))),
+      ),
+    catch: (cause) => new AgentSessionPictureReadError({ message: String(cause) }),
+  }).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("Could not read pictures from a Claude transcript", { cause }).pipe(
+        Effect.as(new Map<string, never>()),
+      ),
+    ),
+  );
+  for (const { message, suffix } of users) {
+    const found = pictures.get(timeKey(message.createdAt));
+    if (found === undefined) continue;
+    const messageId = `${input.threadId}:${suffix}`;
+    const saved: Array<ChatImageAttachment> = [];
+    found.forEach((picture, index) => {
+      const bytes = Buffer.from(picture.data, "base64");
+      if (bytes.length === 0 || bytes.length > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) return;
+      const id = createDeterministicAttachmentId(
+        input.threadId,
+        chatAttachmentStableKey(messageId, index, bytes),
+      );
+      if (id === null) return;
+      const extension = (picture.mimeType.split("/")[1] ?? "png")
+        .replace("jpeg", "jpg")
+        .replace(/[^a-z0-9]/g, "");
+      const attachment: ChatImageAttachment = {
+        type: "image",
+        id,
+        name: `picture-${index + 1}.${extension || "png"}`,
+        mimeType: picture.mimeType,
+        sizeBytes: bytes.length,
+      };
+      const path = resolveAttachmentPath({
+        attachmentsDir: config.value.attachmentsDir,
+        attachment,
+      });
+      if (path === null) return;
+      try {
+        NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
+        NodeFS.writeFileSync(path, bytes, { flag: "wx" });
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== "EEXIST") return;
+      }
+      saved.push(attachment);
+    });
+    if (saved.length > 0) byItem.set(suffix, saved);
+  }
+  return byItem;
+});
 
 function historyTruncatedEvents(input: {
   readonly threadId: ThreadId;
@@ -643,6 +788,11 @@ const make = Effect.gen(function* () {
         sessionId,
       });
       if (history === null || history.messages.length === 0) return 0;
+      const pictures = yield* historyPictures({
+        threadId: input.threadId,
+        transcriptPath: history.transcriptPath,
+        items: history.messages.map((message, index) => ({ message, suffix: historySuffix(index) })),
+      });
       return yield* threadCommands.withLock(
         input.threadId,
         Effect.gen(function* () {
@@ -656,7 +806,12 @@ const make = Effect.gen(function* () {
                 at: dateTime(history.createdAt),
               }),
               ...history.messages.flatMap((message, index) =>
-                messageEvents({ threadId: input.threadId, index, message }),
+                messageEvents({
+                  threadId: input.threadId,
+                  index,
+                  message,
+                  attachments: pictures.get(historySuffix(index)) ?? [],
+                }),
               ),
               {
                 id: EventId.make(
@@ -676,7 +831,97 @@ const make = Effect.gen(function* () {
     },
   );
 
-  return { importRecentAgentThreads, importNativeHistory, importClaudeTranscriptHistory };
+  /**
+   * A linked thread whose history was imported does not see the session go on in another
+   * app (the Claude desktop app). This appends the transcript's newer messages, skipping
+   * T3's own turns (they reach the transcript too) and doing nothing while a run is active.
+   */
+  const ACTIVE_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
+  const catchUpClaudeTranscript = Effect.fn("catchUpClaudeTranscript")(function* (input: {
+    readonly threadId: ThreadId;
+  }) {
+    const read = orchestrator.getThreadRecords(input.threadId, [
+      "providerThreads",
+      "runs",
+      "messages",
+      "turnItems",
+    ]);
+    type Records = Effect.Success<typeof read>;
+    const ready = (records: Records) =>
+      records.thread.deletedAt === null &&
+      records.thread.historyOrigin === "v1_import" &&
+      !records.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status));
+    // The cheap read first: most threads opened are not imported Claude threads.
+    const link = yield* orchestrator.getThreadRecords(input.threadId, ["providerThreads", "runs"]);
+    if (link.thread.deletedAt !== null || link.thread.historyOrigin !== "v1_import") return 0;
+    const records = yield* read;
+    if (!ready(records)) return 0;
+    const providerThread = records.providerThreads.find(
+      (candidate) =>
+        candidate.appThreadId === input.threadId &&
+        candidate.driver === "claudeAgent" &&
+        candidate.nativeThreadRef !== null,
+    );
+    const sessionId = providerThread?.nativeThreadRef?.nativeId;
+    if (providerThread === undefined || sessionId == null) return 0;
+    const history = yield* scanner.claudeSessionHistory({
+      providerInstanceId: providerThread.providerInstanceId,
+      sessionId,
+    });
+    if (history === null) return 0;
+    const items = history.messages.map((message, index) => ({
+      message,
+      suffix: `c${Date.parse(message.createdAt)}-${index}`,
+    }));
+    const fresh = (current: Records) => {
+      const newest = current.messages.reduce(
+        (max, message) => Math.max(max, DateTime.toEpochMillis(message.createdAt)),
+        0,
+      );
+      const recent = new Set(current.messages.slice(-50).map((message) => message.text.trim()));
+      return items.filter(
+        ({ message }) =>
+          Date.parse(message.createdAt) > newest && !recent.has(message.text.trim()),
+      );
+    };
+    const candidates = fresh(records);
+    if (candidates.length === 0) return 0;
+    const pictures = yield* historyPictures({
+      threadId: input.threadId,
+      transcriptPath: history.transcriptPath,
+      items: candidates,
+    });
+    return yield* threadCommands.withLock(
+      input.threadId,
+      Effect.gen(function* () {
+        const current = yield* read;
+        if (!ready(current)) return 0;
+        const appended = fresh(current);
+        if (appended.length === 0) return 0;
+        const base = current.turnItems.reduce((max, item) => Math.max(max, item.ordinal), 0);
+        yield* eventSink.write({
+          events: appended.flatMap(({ message, suffix }, index) =>
+            messageEvents({
+              threadId: input.threadId,
+              index,
+              message,
+              suffix,
+              ordinal: base + index + 1,
+              attachments: pictures.get(suffix) ?? [],
+            }),
+          ),
+        });
+        return appended.length;
+      }),
+    );
+  });
+
+  return {
+    importRecentAgentThreads,
+    importNativeHistory,
+    importClaudeTranscriptHistory,
+    catchUpClaudeTranscript,
+  };
 });
 
 type AgentSessionImporterShape = Effect.Success<typeof make>;
