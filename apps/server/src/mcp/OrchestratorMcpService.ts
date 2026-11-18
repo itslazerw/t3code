@@ -83,6 +83,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -114,6 +115,7 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
+import * as AgentSessionImporter from "../project/AgentSessionImporter.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
@@ -3413,6 +3415,36 @@ const make = Effect.gen(function* () {
         requestKey: key,
         operation: "thread-send",
       });
+      // A thread linked to a Claude session loads its old messages before its first run
+      // starts, since they only load into a thread without runs. Past 30 seconds the
+      // send goes on and the read finishes by itself.
+      const shell = yield* threadManagement
+        .getThreadShell(input.threadId)
+        .pipe(Effect.orElseSucceed(() => null));
+      if (
+        shell !== null &&
+        AgentSessionImporter.isNativeHistoryPending({
+          historyOrigin: shell.historyOrigin,
+          hasRun: shell.latestRunId !== null,
+        })
+      ) {
+        // Optional: the app always has it; a setup without it just skips the step.
+        const importer = yield* Effect.serviceOption(AgentSessionImporter.AgentSessionImporter);
+        const load = yield* (
+          Option.isSome(importer)
+            ? importer.value.importClaudeTranscriptHistory({ threadId: input.threadId })
+            : Effect.succeed(0)
+        ).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not load Claude session history", {
+                threadId: input.threadId,
+                cause,
+              }),
+            ),
+            Effect.forkDetach,
+          );
+        yield* Fiber.await(load).pipe(Effect.timeout("30 seconds"), Effect.ignore);
+      }
       const result = yield* threadManagement
         .sendToThread({
           projectId: target.thread.projectId,
