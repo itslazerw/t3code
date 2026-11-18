@@ -37,6 +37,7 @@ import {
   toSortableTimestamp,
   type ThreadSortInput,
 } from "@t3tools/client-runtime/state/thread-sort";
+import { getProjectOrderKey } from "@t3tools/client-runtime/state/project-grouping";
 import type { SidebarThreadSummary, Thread } from "../types";
 import { normalizeSearchText } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
@@ -1373,6 +1374,52 @@ function sortProjectsByActivity<TProject extends SidebarProject>(
       return byTimestamp || compareTies(left.project, right.project);
     })
     .map(({ project }) => project);
+}
+
+type OrderableProjectGroup = {
+  readonly projectKey: string;
+  readonly pinned: boolean;
+  readonly memberProjects: ReadonlyArray<{ environmentId: EnvironmentId; workspaceRoot: string }>;
+};
+
+/** Pinned groups in T3's stored project order (what the strip's drags write), the rest after them as given. */
+export function orderPinnedProjectGroups<TGroup extends OrderableProjectGroup>(
+  groups: readonly TGroup[],
+  projectOrder: readonly string[],
+): TGroup[] {
+  const pinned = orderItemsByPreferredIds({
+    items: groups.filter((group) => group.pinned),
+    preferredIds: projectOrder,
+    getId: (group) => group.projectKey,
+    getPreferenceIds: (group) =>
+      group.memberProjects.flatMap((member) => [
+        getProjectOrderKey(member),
+        legacyProjectCwdPreferenceKey(member.workspaceRoot),
+      ]),
+  });
+  return [...pinned, ...groups.filter((group) => !group.pinned)];
+}
+
+/** The strip's keys with `key` moved, or added, so it lands before position `beforeIndex`. */
+export function placeStripProjectKey(
+  keys: readonly string[],
+  key: string,
+  beforeIndex: number,
+): string[] {
+  const from = keys.indexOf(key);
+  const next = keys.filter((candidate) => candidate !== key);
+  next.splice(from >= 0 && from < beforeIndex ? beforeIndex - 1 : beforeIndex, 0, key);
+  return next;
+}
+
+/** T3's stored project order with these groups' checkouts first, in this order; the rest keep theirs. */
+export function projectOrderWithGroupsFirst(
+  groups: readonly OrderableProjectGroup[],
+  projectOrder: readonly string[],
+): string[] {
+  const first = groups.flatMap((group) => group.memberProjects.map(getProjectOrderKey));
+  const moved = new Set(first);
+  return [...first, ...projectOrder.filter((key) => !moved.has(key))];
 }
 
 export function sortLogicalProjectsForSidebar<

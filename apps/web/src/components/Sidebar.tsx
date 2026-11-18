@@ -190,6 +190,9 @@ import {
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
+  orderPinnedProjectGroups,
+  placeStripProjectKey,
+  projectOrderWithGroupsFirst,
   planSidebarThreadDrop,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
@@ -814,6 +817,7 @@ function useSidebarLookups() {
   const serverConfigs = useServerConfigs();
   const providerEntriesByEnvironment = useAtomValue(sidebarProviderEntriesAtom);
   const projectGroups = useSidebarProjectGroups();
+  const projectOrder = useUiStateStore((store) => store.projectOrder);
   const environmentLabelById = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
   );
@@ -830,9 +834,14 @@ function useSidebarLookups() {
   const projectGroupByScopeKey = new Map(
     projectGroups.map((project) => [project.projectKey, project] as const),
   );
+  // Pinned projects keep the order dragged in the project strip, in the filter menu too.
+  const pickableGroups = orderPinnedProjectGroups(
+    pickableProjectGroups(projectGroups),
+    projectOrder,
+  );
   const projectScopeItems = [
     { value: "all", label: "All projects" },
-    ...pickableProjectGroups(projectGroups).map((project) => ({
+    ...pickableGroups.map((project) => ({
       value: project.projectKey,
       label: project.displayName,
     })),
@@ -847,6 +856,7 @@ function useSidebarLookups() {
     projectDisplayNameByKey,
     projectGroupByScopeKey,
     projectScopeItems,
+    pickableGroups,
   };
 }
 
@@ -914,6 +924,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectDisplayNameByKey,
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
+    pickableGroups,
   } = useSidebarLookups();
   const delegatedUnderParent = useDelegatedUnderParent();
   const router = useRouter();
@@ -1297,6 +1308,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       })();
     },
   );
+  const projectOrder = useUiStateStore((store) => store.projectOrder);
+  const setProjectOrder = useUiStateStore((store) => store.setProjectOrder);
+  // A drop on the project strip: reorders the pinned icons, pinning a project dragged in.
+  const placeStripProject = (projectKey: string, beforeIndex: number) => {
+    const group = projectGroupByScopeKey.get(projectKey);
+    if (!group || group.archived || (!group.pinned && !canPinProject(group))) return;
+    const pinnedKeys = pickableGroups.filter((g) => g.pinned).map((g) => g.projectKey);
+    const ordered = placeStripProjectKey(pinnedKeys, projectKey, beforeIndex).flatMap((key) => {
+      const pinnedGroup = projectGroupByScopeKey.get(key);
+      return pinnedGroup ? [pinnedGroup] : [];
+    });
+    setProjectOrder(projectOrderWithGroupsFirst(ordered, projectOrder));
+    if (!group.pinned) setProjectGroupPinned(group, true);
+  };
 
   const {
     workingShelfEnabled,
@@ -3198,11 +3223,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               onClearSearch={clearThreadSearch}
             />
             <SidebarProjectStrip
-              projects={scopeGroups}
+              projects={pickableGroups}
               selectedKeys={projectScopeKeys}
               onShowAll={() => setProjectScopeKeys([])}
               onShowOnly={(key) => setProjectScopeKeys([key])}
               onToggle={toggleProjectScopeKey}
+              onContextMenu={(key, position, source) => {
+                const group = projectGroupByScopeKey.get(key);
+                if (group) handleProjectFolderContextMenu(group, position, source);
+              }}
+              onPlace={placeStripProject}
+              onUnpin={(key) => {
+                const group = projectGroupByScopeKey.get(key);
+                if (group?.pinned && canPinProject(group)) setProjectGroupPinned(group, false);
+              }}
             />
           </SidebarGroup>
         }

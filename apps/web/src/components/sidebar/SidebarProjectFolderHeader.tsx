@@ -12,6 +12,7 @@ import { resolveSidebarFolderDot, resolveThreadLastVisitedAt } from "../Sidebar.
 import { ProjectFavicon } from "../ProjectFavicon";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { PROJECT_STRIP_DRAG_TYPE } from "./SidebarProjectStrip";
 
 const FOLDER_DOT_CLASS_NAME = {
   attention: "bg-warning",
@@ -75,6 +76,12 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
         data-sidebar-row={rowId}
         aria-expanded={!collapsed}
         onClick={() => props.onToggle(group)}
+        // Dragged onto the project strip, it pins the project there.
+        draggable
+        onDragStart={(event) => {
+          event.dataTransfer.setData(PROJECT_STRIP_DRAG_TYPE, group.projectKey);
+          event.dataTransfer.effectAllowed = "move";
+        }}
         onContextMenu={(event) => {
           event.preventDefault();
           props.onContextMenu(

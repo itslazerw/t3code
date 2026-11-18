@@ -36,6 +36,9 @@ import {
   groupSidebarThreadsByProject,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
+  orderPinnedProjectGroups,
+  placeStripProjectKey,
+  projectOrderWithGroupsFirst,
 } from "./Sidebar.logic";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -1680,5 +1683,50 @@ describe("shouldCreateNewThreadInCurrentProject", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 1, 3)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(false, 0, 0)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(true, 2, 2)).toBe(true);
+  });
+});
+
+describe("project strip order", () => {
+  const group = (
+    projectKey: string,
+    pinned: boolean,
+    roots: string[] = [`/repo/${projectKey}`],
+  ) => ({
+    projectKey,
+    pinned,
+    memberProjects: roots.map((workspaceRoot) => ({
+      environmentId: localEnvironmentId,
+      workspaceRoot,
+    })),
+  });
+  const orderKey = (root: string) =>
+    projectOrderWithGroupsFirst([group("x", true, [root])], [])[0]!;
+
+  it("orders pinned groups by the stored order and leaves the rest after them", () => {
+    const groups = [group("a", true), group("u", false), group("b", true), group("c", true)];
+    const ordered = orderPinnedProjectGroups(groups, [orderKey("/repo/c"), orderKey("/repo/a")]);
+    expect(ordered.map((g) => g.projectKey)).toEqual(["c", "a", "b", "u"]);
+  });
+
+  it("places a key before a position, moving or adding it", () => {
+    expect(placeStripProjectKey(["a", "b", "c"], "a", 3)).toEqual(["b", "c", "a"]);
+    expect(placeStripProjectKey(["a", "b", "c"], "c", 0)).toEqual(["c", "a", "b"]);
+    expect(placeStripProjectKey(["a", "b", "c"], "a", 2)).toEqual(["b", "a", "c"]);
+    expect(placeStripProjectKey(["a", "b"], "n", 1)).toEqual(["a", "n", "b"]);
+  });
+
+  it("puts the groups' checkouts first and keeps the rest of the stored order", () => {
+    const stored = [orderKey("/repo/z"), orderKey("/repo/b"), orderKey("/repo/a")];
+    expect(
+      projectOrderWithGroupsFirst(
+        [group("a", true), group("b", true, ["/repo/b", "/other/b"])],
+        stored,
+      ),
+    ).toEqual([
+      orderKey("/repo/a"),
+      orderKey("/repo/b"),
+      orderKey("/other/b"),
+      orderKey("/repo/z"),
+    ]);
   });
 });
