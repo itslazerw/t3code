@@ -254,6 +254,7 @@ import {
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
+import { SidebarProjectStrip } from "./sidebar/SidebarProjectStrip";
 import { TooltipProvider } from "./ui/tooltip";
 import {
   composerDraftHasUserContent,
@@ -3195,6 +3196,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               searchResultCount={threadSearchResults.length}
               activeSearchResultIndex={activeSearchResultIndex}
               onClearSearch={clearThreadSearch}
+            />
+            <SidebarProjectStrip
+              projects={scopeGroups}
+              selectedKeys={projectScopeKeys}
+              onShowAll={() => setProjectScopeKeys([])}
+              onShowOnly={(key) => setProjectScopeKeys([key])}
+              onToggle={toggleProjectScopeKey}
             />
           </SidebarGroup>
         }
