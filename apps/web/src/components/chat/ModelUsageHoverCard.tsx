@@ -24,7 +24,10 @@ import {
   usageWindowLabel,
 } from "./ModelUsageHoverCard.logic";
 
-const OPEN_DELAY_MS = 2000;
+// Opens once the mouse rests on the picker this long: passing over it never stops, so no card.
+const REST_MS = 400;
+// Smaller moves than this still count as resting.
+const REST_SLOP_PX = 4;
 // An older reading is refreshed in the background when the card opens; the card never waits for it.
 const STALE_AFTER_MS = 2 * 60_000;
 const EMPTY_PROVIDERS: readonly ServerProvider[] = [];
@@ -137,7 +140,7 @@ function UsageCardBody({
 }
 
 /**
- * After a 2 second mouse hover on the model picker, shows the plan limits of the account the
+ * When the mouse rests on the model picker for a moment, shows the plan limits of the account the
  * picker is set to. It sits beside the picker and watches its button, so the picker itself stays
  * as T3 ships it. The picker's own popup always wins.
  */
@@ -179,6 +182,8 @@ export function ModelUsageHoverCard({
     reportFailure: false,
   });
   const timers = useRef<{ open?: number | undefined; close?: number | undefined }>({});
+  // Where the mouse last started resting.
+  const restAt = useRef({ x: 0, y: 0 });
   const popupRef = useRef<HTMLDivElement>(null);
   if (openFor !== null && (pickerOpen || openFor !== instanceId || !enabled)) setOpenFor(null);
 
@@ -217,11 +222,21 @@ export function ModelUsageHoverCard({
   const onAnchorEnter = useEffectEvent((event: PointerEvent) => {
     if (event.pointerType !== "mouse") return;
     window.clearTimeout(timers.current.close);
-    if (timers.current.open !== undefined) return;
+    startRest(event);
+  });
+  // (Re)starts the rest clock; a mouse still moving over the picker is only passing through.
+  const startRest = (event: PointerEvent) => {
+    restAt.current = { x: event.clientX, y: event.clientY };
+    window.clearTimeout(timers.current.open);
     timers.current.open = window.setTimeout(() => {
       timers.current.open = undefined;
       openCard();
-    }, OPEN_DELAY_MS);
+    }, REST_MS);
+  };
+  const onAnchorMove = useEffectEvent((event: PointerEvent) => {
+    if (event.pointerType !== "mouse" || timers.current.open === undefined) return;
+    const moved = Math.hypot(event.clientX - restAt.current.x, event.clientY - restAt.current.y);
+    if (moved > REST_SLOP_PX) startRest(event);
   });
   const onAnchorLeave = useEffectEvent(() => {
     window.clearTimeout(timers.current.open);
@@ -238,13 +253,16 @@ export function ModelUsageHoverCard({
     const anchor = anchorRef.current;
     if (!enabled || environmentId === null || anchor === null) return;
     const enter = (event: PointerEvent) => onAnchorEnter(event);
+    const move = (event: PointerEvent) => onAnchorMove(event);
     const leave = () => onAnchorLeave();
     const press = () => onAnchorPress();
     anchor.addEventListener("pointerenter", enter);
+    anchor.addEventListener("pointermove", move);
     anchor.addEventListener("pointerleave", leave);
     anchor.addEventListener("pointerdown", press);
     return () => {
       anchor.removeEventListener("pointerenter", enter);
+      anchor.removeEventListener("pointermove", move);
       anchor.removeEventListener("pointerleave", leave);
       anchor.removeEventListener("pointerdown", press);
       window.clearTimeout(timers.current.open);
