@@ -927,11 +927,92 @@ const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * Threads that loaded their old messages before pictures were imported get them added
+   * to those same messages: an imported user message carries its transcript record's time.
+   */
+  const fillHistoryPictures = Effect.fn("fillHistoryPictures")(function* (input: {
+    readonly threadId: ThreadId;
+  }) {
+    const link = yield* orchestrator.getThreadRecords(input.threadId, ["providerThreads"]);
+    const providerThread = link.providerThreads.find(
+      (candidate) =>
+        candidate.appThreadId === input.threadId &&
+        candidate.driver === "claudeAgent" &&
+        candidate.nativeThreadRef !== null,
+    );
+    const sessionId = providerThread?.nativeThreadRef?.nativeId;
+    if (link.thread.deletedAt !== null || providerThread === undefined || sessionId == null) {
+      return 0;
+    }
+    const records = yield* orchestrator.getThreadRecords(input.threadId, ["messages", "turnItems"]);
+    const bare = records.turnItems.flatMap((item) =>
+      item.type === "user_message" && item.runId === null && item.attachments.length === 0
+        ? [item]
+        : [],
+    );
+    if (bare.length === 0) return 0;
+    const history = yield* scanner.claudeSessionHistory({
+      providerInstanceId: providerThread.providerInstanceId,
+      sessionId,
+    });
+    if (history === null) return 0;
+    const messagesById = new Map(records.messages.map((message) => [message.id, message]));
+    const items = bare.flatMap((item) => {
+      const message = messagesById.get(item.messageId);
+      const prefix = `${input.threadId}:`;
+      return message === undefined || !message.id.startsWith(prefix)
+        ? []
+        : [
+            {
+              item,
+              message,
+              suffix: message.id.slice(prefix.length),
+              history: {
+                role: "user" as const,
+                text: message.text,
+                createdAt: DateTime.formatIso(message.createdAt),
+              },
+            },
+          ];
+    });
+    const pictures = yield* historyPictures({
+      threadId: input.threadId,
+      transcriptPath: history.transcriptPath,
+      items: items.map(({ history: message, suffix }) => ({ message, suffix })),
+    });
+    const found = items.flatMap((entry) => {
+      const attachments = pictures.get(entry.suffix);
+      return attachments === undefined ? [] : [{ ...entry, attachments }];
+    });
+    if (found.length === 0) return 0;
+    yield* eventSink.write({
+      events: found.flatMap(({ item, message, suffix, attachments }) => [
+        {
+          id: EventId.make(`${IMPORT_EVENT_PREFIX}:pictures:message:${input.threadId}:${suffix}`),
+          type: "message.updated" as const,
+          threadId: input.threadId,
+          occurredAt: message.createdAt,
+          payload: { ...message, attachments },
+        },
+        {
+          id: EventId.make(`${IMPORT_EVENT_PREFIX}:pictures:turn-item:${input.threadId}:${suffix}`),
+          type: "turn-item.updated" as const,
+          threadId: input.threadId,
+          occurredAt: message.createdAt,
+          payload: { ...item, attachments },
+        },
+      ]),
+    });
+    return found.length;
+  });
+
   return {
     importRecentAgentThreads,
     importNativeHistory,
     importClaudeTranscriptHistory,
     catchUpClaudeTranscript,
+    fillHistoryPictures,
   };
 });
 

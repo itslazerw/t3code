@@ -1514,6 +1514,7 @@ export const layerWsRpc = (
       // long read finishes in the background and streams in. Tried once per 5 minutes.
       const claudeHistoryTriedAt = new Map<ThreadId, number>();
       const claudeCatchUpAt = new Map<ThreadId, number>();
+      const claudePicturesFilled = new Set<ThreadId>();
       const loadClaudeHistoryOnOpen = Effect.fn("ws.loadClaudeHistoryOnOpen")(
         function* (threadId: ThreadId) {
           const now = yield* Clock.currentTimeMillis;
@@ -1526,6 +1527,14 @@ export const layerWsRpc = (
             if (claudeCatchUpAt.size >= 2000) claudeCatchUpAt.clear();
             claudeCatchUpAt.set(threadId, now);
             yield* agentSessionImporter.catchUpClaudeTranscript({ threadId }).pipe(
+              // Once per thread while the server runs: old messages loaded before pictures came.
+              Effect.andThen(
+                claudePicturesFilled.has(threadId)
+                  ? Effect.void
+                  : Effect.sync(() => claudePicturesFilled.add(threadId)).pipe(
+                      Effect.andThen(agentSessionImporter.fillHistoryPictures({ threadId })),
+                    ),
+              ),
               Effect.catchCause((cause) =>
                 Effect.logWarning("Could not catch up a Claude session", { threadId, cause }),
               ),
