@@ -1540,6 +1540,31 @@ export const layerWsRpc = (
         },
         (effect) => Effect.ignoreCause(effect),
       );
+      // A message can reach such a thread before anyone opens it (another tool sends
+      // it). History only loads into a thread without runs, so the send waits for it
+      // first; a read past 30 seconds lets the send go and finishes on its own.
+      const loadClaudeHistoryBeforeSend = Effect.fn("ws.loadClaudeHistoryBeforeSend")(
+        function* (threadId: ThreadId) {
+          const shell = yield* threadManagement.getThreadShell(threadId);
+          if (
+            shell === null ||
+            !AgentSessionImporter.isNativeHistoryPending({
+              historyOrigin: shell.historyOrigin,
+              hasRun: shell.latestRunId !== null,
+            })
+          ) {
+            return;
+          }
+          const load = yield* agentSessionImporter.importClaudeTranscriptHistory({ threadId }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not load Claude session history", { threadId, cause }),
+            ),
+            Effect.forkDetach,
+          );
+          yield* Fiber.await(load).pipe(Effect.timeout("30 seconds"), Effect.ignore);
+        },
+        (effect) => Effect.ignoreCause(effect),
+      );
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const nativeChildWork = yield* NativeChildWorkQuery.NativeChildWorkQuery;
       const keybindings = yield* Keybindings.Keybindings;
@@ -2013,6 +2038,11 @@ export const layerWsRpc = (
               : {}),
           }).pipe(
             Effect.andThen(
+              command.type === "message.dispatch"
+                ? loadClaudeHistoryBeforeSend(command.threadId)
+                : Effect.void,
+            ),
+            Effect.andThen(
               startup
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
@@ -2185,6 +2215,11 @@ export const layerWsRpc = (
             "orchestration_v2.command_id": input.commandId,
             "orchestration_v2.project_id": input.projectId,
           }).pipe(
+            Effect.andThen(
+              input.threadId === undefined
+                ? Effect.void
+                : loadClaudeHistoryBeforeSend(input.threadId),
+            ),
             Effect.andThen(
               startup
                 .enqueueCommand(
