@@ -832,8 +832,8 @@ const make = Effect.gen(function* () {
   );
 
   /**
-   * A linked thread whose history was imported does not see the session go on in another
-   * app (the Claude desktop app). This appends the transcript's newer messages, skipping
+   * A thread linked to a Claude session does not see the session go on in another app
+   * (the Claude desktop app). This appends the transcript's newer messages, skipping
    * T3's own turns (they reach the transcript too) and doing nothing while a run is active.
    */
   const ACTIVE_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
@@ -847,13 +847,24 @@ const make = Effect.gen(function* () {
       "turnItems",
     ]);
     type Records = Effect.Success<typeof read>;
+    // A thread that already shows messages; an empty one gets its history from the import.
     const ready = (records: Records) =>
       records.thread.deletedAt === null &&
-      records.thread.historyOrigin === "v1_import" &&
+      records.messages.length > 0 &&
       !records.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status));
-    // The cheap read first: most threads opened are not imported Claude threads.
+    // The cheap read first: most threads opened are not linked to a Claude session.
     const link = yield* orchestrator.getThreadRecords(input.threadId, ["providerThreads", "runs"]);
-    if (link.thread.deletedAt !== null || link.thread.historyOrigin !== "v1_import") return 0;
+    if (
+      link.thread.deletedAt !== null ||
+      !link.providerThreads.some(
+        (candidate) =>
+          candidate.appThreadId === input.threadId &&
+          candidate.driver === "claudeAgent" &&
+          candidate.nativeThreadRef !== null,
+      )
+    ) {
+      return 0;
+    }
     const records = yield* read;
     if (!ready(records)) return 0;
     const providerThread = records.providerThreads.find(

@@ -3422,7 +3422,7 @@ const make = Effect.gen(function* () {
         .getThreadShell(input.threadId)
         .pipe(Effect.orElseSucceed(() => null));
       if (
-        shell !== null &&
+        shell === null ||
         AgentSessionImporter.isNativeHistoryPending({
           historyOrigin: shell.historyOrigin,
           hasRun: shell.latestRunId !== null,

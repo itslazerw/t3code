@@ -1517,8 +1517,9 @@ export const layerWsRpc = (
       const loadClaudeHistoryOnOpen = Effect.fn("ws.loadClaudeHistoryOnOpen")(
         function* (threadId: ThreadId) {
           const now = yield* Clock.currentTimeMillis;
+          // Imported threads can lack a shell row, so a missing shell never stops these steps;
+          // the importer checks the thread's own records.
           const shell = yield* threadManagement.getThreadShell(threadId);
-          if (shell === null) return;
           // History already imported: bring in what the session said since, in another app.
           // The shell does not carry historyOrigin, so the importer checks it on the records.
           if (now - (claudeCatchUpAt.get(threadId) ?? 0) >= 60_000) {
@@ -1533,6 +1534,7 @@ export const layerWsRpc = (
           }
           if (now - (claudeHistoryTriedAt.get(threadId) ?? 0) < 5 * 60_000) return;
           if (
+            shell !== null &&
             !AgentSessionImporter.isNativeHistoryPending({
               historyOrigin: shell.historyOrigin,
               hasRun: shell.latestRunId !== null,
@@ -1560,7 +1562,7 @@ export const layerWsRpc = (
         function* (threadId: ThreadId) {
           const shell = yield* threadManagement.getThreadShell(threadId);
           if (
-            shell === null ||
+            shell !== null &&
             !AgentSessionImporter.isNativeHistoryPending({
               historyOrigin: shell.historyOrigin,
               hasRun: shell.latestRunId !== null,
