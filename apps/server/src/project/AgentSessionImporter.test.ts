@@ -196,6 +196,8 @@ const makeImporter = Effect.fn(function* (
     readonly workspaceRoot: string;
     readonly scanner: AgentSessionScanner.AgentSessionScanner["Service"];
   },
+  claudeSessionHistory: AgentSessionScanner.AgentSessionScanner["Service"]["claudeSessionHistory"] = () =>
+    Effect.succeed(null),
 ) {
   const sql = yield* SqlClient.SqlClient;
   const events = yield* EventStore.EventStoreV2;
@@ -240,6 +242,7 @@ const makeImporter = Effect.fn(function* (
           realScan === undefined
             ? Layer.mock(AgentSessionScanner.AgentSessionScanner)({
                 recentThreads: () => Stream.fromIterable(candidates),
+                claudeSessionHistory,
               })
             : Layer.succeed(AgentSessionScanner.AgentSessionScanner, realScan.scanner),
           Layer.mock(ProjectService.ProjectService)({
@@ -280,6 +283,7 @@ const makeImporter = Effect.fn(function* (
   return {
     run: importer.importRecentAgentThreads({ projectId }),
     importNativeHistory: importer.importNativeHistory,
+    importClaudeTranscriptHistory: importer.importClaudeTranscriptHistory,
     published,
   };
 });
@@ -929,6 +933,82 @@ it.effect("skips the native history when a run starts while it loads", () =>
     expect(result.runs).toHaveLength(1);
     expect(result.thread.historyOrigin).toBeUndefined();
     expect(result.items).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+const CLAUDE_SESSION = "0f3c2b8e-4d1a-4c7e-9b2f-6a5d4e3c2b1a";
+
+const claudeTranscriptImporter = Effect.fn(function* (asked: Array<string>) {
+  const transcript = candidate(CLAUDE_MODEL_SELECTION, CLAUDE_SESSION, "claudeAgent");
+  return yield* makeImporter([], Effect.void, undefined, undefined, undefined, undefined, (input) =>
+    Effect.sync(() => {
+      asked.push(input.sessionId);
+      return { ...transcript.thread, omittedMessageCount: 3 };
+    }),
+  );
+});
+
+it.effect("fills an empty Claude thread from its transcript once, keeping its title", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* seedOwner(
+      candidate(CLAUDE_MODEL_SELECTION, CLAUDE_SESSION, "claudeAgent"),
+    );
+    const asked: Array<string> = [];
+    const importer = yield* claudeTranscriptImporter(asked);
+    expect(yield* importer.importClaudeTranscriptHistory({ threadId })).toBe(2);
+    expect(yield* importer.importClaudeTranscriptHistory({ threadId })).toBe(0);
+    const { thread, messages, turnItems } = yield* projections.getThreadRecords(threadId, [
+      "messages",
+      "turnItems",
+    ]);
+    expect(asked).toEqual([CLAUDE_SESSION]);
+    expect(thread.title).toBe("Native thread");
+    expect(thread.historyOrigin).toBe("v1_import");
+    expect(messages.map((message) => message.text)).toEqual(["Fix it", "Fixed"]);
+    expect(turnItems.filter((item) => item.type === "system_notice")).toHaveLength(1);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("leaves a Claude thread that already ran alone", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* seedOwner(
+      candidate(CLAUDE_MODEL_SELECTION, CLAUDE_SESSION, "claudeAgent"),
+    );
+    const { thread } = yield* projections.getThreadRecords(threadId, []);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`${threadId}:run`),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: RunId.make(`${threadId}:run`),
+            threadId,
+            ordinal: 1,
+            providerInstanceId: thread.providerInstanceId,
+            modelSelection: thread.modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make(`${threadId}:prompt`),
+            rootNodeId: null,
+            activeAttemptId: null,
+            status: "queued",
+            requestedAt: now,
+            startedAt: null,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        },
+      ],
+    });
+    const asked: Array<string> = [];
+    const importer = yield* claudeTranscriptImporter(asked);
+    expect(yield* importer.importClaudeTranscriptHistory({ threadId })).toBe(0);
+    expect(asked).toEqual([]);
   }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
 

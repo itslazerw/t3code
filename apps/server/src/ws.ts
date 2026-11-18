@@ -10,6 +10,7 @@ import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Base64 from "effect/encoding/Base64";
 import * as Effect from "effect/Effect";
@@ -1508,6 +1509,37 @@ export const layerWsRpc = (
       const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const agentSessionImporter = yield* AgentSessionImporter.AgentSessionImporter;
+      // A thread another tool linked to a Claude session opens with that session's
+      // messages. The first open waits a moment so they arrive with the snapshot; a
+      // long read finishes in the background and streams in. Tried once per 5 minutes.
+      const claudeHistoryTriedAt = new Map<ThreadId, number>();
+      const loadClaudeHistoryOnOpen = Effect.fn("ws.loadClaudeHistoryOnOpen")(
+        function* (threadId: ThreadId) {
+          const now = yield* Clock.currentTimeMillis;
+          if (now - (claudeHistoryTriedAt.get(threadId) ?? 0) < 5 * 60_000) return;
+          const shell = yield* threadManagement.getThreadShell(threadId);
+          if (
+            shell === null ||
+            !AgentSessionImporter.isNativeHistoryPending({
+              historyOrigin: shell.historyOrigin,
+              hasRun: shell.latestRunId !== null,
+            })
+          ) {
+            return;
+          }
+          // Old entries go once the list grows; a retry after that only costs one more read.
+          if (claudeHistoryTriedAt.size >= 2000) claudeHistoryTriedAt.clear();
+          claudeHistoryTriedAt.set(threadId, now);
+          const load = yield* agentSessionImporter.importClaudeTranscriptHistory({ threadId }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not load Claude session history", { threadId, cause }),
+            ),
+            Effect.forkDetach,
+          );
+          yield* Fiber.await(load).pipe(Effect.timeout("3 seconds"), Effect.ignore);
+        },
+        (effect) => Effect.ignoreCause(effect),
+      );
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const nativeChildWork = yield* NativeChildWorkQuery.NativeChildWorkQuery;
       const keybindings = yield* Keybindings.Keybindings;
@@ -2282,6 +2314,7 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
+              Effect.andThen(loadClaudeHistoryOnOpen(input.threadId)),
               Effect.andThen(subscribeOrchestrationV2Thread(input)),
             ),
           ),

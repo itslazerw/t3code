@@ -194,6 +194,42 @@ function messageEvents(input: {
   ];
 }
 
+function historyTruncatedEvents(input: {
+  readonly threadId: ThreadId;
+  readonly omittedMessageCount: number;
+  readonly at: DateTime.Utc;
+}): ReadonlyArray<OrchestrationV2DomainEvent> {
+  const { threadId, omittedMessageCount: count, at } = input;
+  if (count <= 0) return [];
+  const id = `${IMPORT_EVENT_PREFIX}:history-truncated:${threadId}`;
+  return [
+    {
+      id: EventId.make(id),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: at,
+      payload: {
+        id: TurnItemId.make(id),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title: null,
+        startedAt: at,
+        completedAt: at,
+        updatedAt: at,
+        type: "system_notice",
+        message: `${count} earlier ${count === 1 ? "message was" : "messages were"} not imported. This thread keeps the first user message and the most recent history. The original session transcript is unchanged.`,
+      },
+    },
+  ];
+}
+
 const make = Effect.gen(function* () {
   const scanner = yield* AgentSessionScanner.AgentSessionScanner;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -431,34 +467,11 @@ const make = Effect.gen(function* () {
                 occurredAt: createdAt,
                 payload: appThread,
               },
-              ...(thread.omittedMessageCount > 0
-                ? [
-                    {
-                      id: EventId.make(`${IMPORT_EVENT_PREFIX}:history-truncated:${threadId}`),
-                      type: "turn-item.updated" as const,
-                      threadId,
-                      occurredAt: createdAt,
-                      payload: {
-                        id: TurnItemId.make(`${IMPORT_EVENT_PREFIX}:history-truncated:${threadId}`),
-                        threadId,
-                        runId: null,
-                        nodeId: null,
-                        providerThreadId: null,
-                        providerTurnId: null,
-                        nativeItemRef: null,
-                        parentItemId: null,
-                        ordinal: 0,
-                        status: "completed" as const,
-                        title: null,
-                        startedAt: createdAt,
-                        completedAt: createdAt,
-                        updatedAt: createdAt,
-                        type: "system_notice" as const,
-                        message: `${thread.omittedMessageCount} earlier ${thread.omittedMessageCount === 1 ? "message was" : "messages were"} not imported. This thread keeps the first user message and the most recent history. The original session transcript is unchanged.`,
-                      },
-                    },
-                  ]
-                : []),
+              ...historyTruncatedEvents({
+                threadId,
+                omittedMessageCount: thread.omittedMessageCount,
+                at: createdAt,
+              }),
               ...thread.messages.flatMap((message, index) =>
                 messageEvents({ threadId, index, message }),
               ),
@@ -596,7 +609,74 @@ const make = Effect.gen(function* () {
     return yield* commit(messages);
   });
 
-  return { importRecentAgentThreads, importNativeHistory };
+  /**
+   * A Claude thread linked to an existing session but holding none of its messages,
+   * such as one another tool created, gets them from the session's transcript. The
+   * transcript is only read. Like importNativeHistory, `v1_import` marks it done.
+   */
+  const importClaudeTranscriptHistory = Effect.fn("importClaudeTranscriptHistory")(
+    function* (input: { readonly threadId: ThreadId }) {
+      const pendingThread = Effect.map(
+        orchestrator.getThreadRecords(input.threadId, ["providerThreads", "runs", "messages"]),
+        (records) =>
+          records.thread.deletedAt === null &&
+          records.messages.length === 0 &&
+          isNativeHistoryPending({
+            historyOrigin: records.thread.historyOrigin,
+            hasRun: records.runs.length > 0,
+          })
+            ? records
+            : null,
+      );
+      const records = yield* pendingThread;
+      if (records === null) return 0;
+      const providerThread = records.providerThreads.find(
+        (candidate) =>
+          candidate.appThreadId === input.threadId &&
+          candidate.driver === "claudeAgent" &&
+          candidate.nativeThreadRef !== null,
+      );
+      const sessionId = providerThread?.nativeThreadRef?.nativeId;
+      if (providerThread === undefined || sessionId == null) return 0;
+      const history = yield* scanner.claudeSessionHistory({
+        providerInstanceId: providerThread.providerInstanceId,
+        sessionId,
+      });
+      if (history === null || history.messages.length === 0) return 0;
+      return yield* threadCommands.withLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const current = yield* pendingThread;
+          if (current === null) return 0;
+          yield* eventSink.write({
+            events: [
+              ...historyTruncatedEvents({
+                threadId: input.threadId,
+                omittedMessageCount: history.omittedMessageCount,
+                at: dateTime(history.createdAt),
+              }),
+              ...history.messages.flatMap((message, index) =>
+                messageEvents({ threadId: input.threadId, index, message }),
+              ),
+              {
+                id: EventId.make(
+                  `${IMPORT_EVENT_PREFIX}:thread:${input.threadId}:claude-transcript-history`,
+                ),
+                type: "thread.metadata-updated",
+                threadId: input.threadId,
+                providerInstanceId: current.thread.providerInstanceId,
+                occurredAt: yield* DateTime.now,
+                payload: { ...current.thread, historyOrigin: "v1_import" },
+              },
+            ],
+          });
+          return history.messages.length;
+        }),
+      );
+    },
+  );
+
+  return { importRecentAgentThreads, importNativeHistory, importClaudeTranscriptHistory };
 });
 
 type AgentSessionImporterShape = Effect.Success<typeof make>;

@@ -1343,6 +1343,25 @@ function latestContextTransfer(
   }, undefined);
 }
 
+/**
+ * Whether the session a run resumes already holds the imported history. An ACP
+ * session replays it on load; a Claude session resumes from the very transcript
+ * the history came from, as long as the run stays on Claude.
+ */
+export function nativeSessionHoldsImportedHistory(input: {
+  readonly providerThread:
+    | Pick<OrchestrationV2ProviderThread, "driver" | "nativeThreadRef">
+    | undefined;
+  readonly targetDriver: string;
+}): boolean {
+  const { providerThread } = input;
+  if (providerThread?.nativeThreadRef == null) return false;
+  return (
+    providerThread.driver === "acpRegistry" ||
+    (providerThread.driver === "claudeAgent" && input.targetDriver === "claudeAgent")
+  );
+}
+
 export function shouldPrepareLegacyImportHandoff(input: {
   readonly hasNativeHistory?: boolean;
   readonly hasCompletedRun: boolean;
@@ -7995,9 +8014,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           nativeThreadId: `pending:${runId}`,
         });
       const legacyImportHandoff = shouldPrepareLegacyImportHandoff({
-        hasNativeHistory:
-          activeProviderThread?.driver === "acpRegistry" &&
-          activeProviderThread.nativeThreadRef !== null,
+        hasNativeHistory: nativeSessionHoldsImportedHistory({
+          providerThread: activeProviderThread,
+          targetDriver: adapter.driver,
+        }),
         historyOrigin: projection.thread.historyOrigin,
         hasCompletedRun: latestCompletedRun !== undefined,
         legacyImportItemCount: legacyImportItems.length,

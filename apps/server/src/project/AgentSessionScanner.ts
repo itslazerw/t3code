@@ -71,6 +71,8 @@ class CodexStateReadError extends Schema.TaggedError<CodexStateReadError>()("Cod
 }
 const METADATA_READ_BYTES = 8 * 1024;
 const MAX_TRANSCRIPT_SCAN_BYTES = 1024 * 1024;
+const CLAUDE_TRANSCRIPT_SESSION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_CODEX_SESSION_INDEX_BYTES = 1024 * 1024;
 const MAX_CODEX_PROJECT_ROOT_ROWS = 100_000;
 
@@ -134,6 +136,8 @@ const TranscriptRecord = Schema.Struct({
   isSidechain: Schema.optional(Schema.Boolean),
   isMeta: Schema.optional(Schema.Boolean),
   isCompactSummary: Schema.optional(Schema.Boolean),
+  // Claude marks who wrote a user record: "human", or a machine such as "task-notification".
+  origin: Schema.optional(Schema.Unknown),
   message: Schema.optional(TranscriptMessage),
   payload: Schema.optional(
     Schema.Struct({
@@ -238,6 +242,11 @@ export class AgentSessionScanner extends Context.Service<
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
+    /** One Claude session's history, read from its transcript; null when none is found. */
+    readonly claudeSessionHistory: (input: {
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly sessionId: string;
+    }) => Effect.Effect<AgentSessionThread | null>;
   }
 >()("t3/project/AgentSessionScanner") {}
 
@@ -340,7 +349,38 @@ function codexTurnId(metadata: unknown): string | null {
 }
 
 function isHiddenClaudeRecord(record: DecodedTranscriptRecord): boolean {
-  return record.isSidechain === true || record.isMeta === true || record.isCompactSummary === true;
+  return (
+    record.isSidechain === true ||
+    record.isMeta === true ||
+    record.isCompactSummary === true ||
+    (record.type === "user" && isMachineOrigin(record.origin))
+  );
+}
+
+const LOCAL_COMMAND_OUTPUT = /^<local-command-(stdout|stderr|caveat)>/;
+const COMMAND_NAME = /<command-name>([^<]*)<\/command-name>/;
+const COMMAND_ARGS = /<command-args>([^<]*)<\/command-args>/;
+
+/**
+ * What the user typed in a Claude user record: a slash command reads as typed, such
+ * as "/model opus", and a command's printed output is left out (null).
+ */
+function claudeTypedText(text: string): string | null {
+  const trimmed = text.trimStart();
+  if (LOCAL_COMMAND_OUTPUT.test(trimmed)) return null;
+  if (!trimmed.startsWith("<command-name>") && !trimmed.startsWith("<command-message>")) {
+    return text;
+  }
+  const name = COMMAND_NAME.exec(trimmed)?.[1]?.trim();
+  if (!name) return text;
+  const args = COMMAND_ARGS.exec(trimmed)?.[1]?.trim();
+  return args ? `${name} ${args}` : name;
+}
+
+// Task notifications and messages from other sessions arrive as user records, but nobody typed them.
+function isMachineOrigin(origin: unknown): boolean {
+  if (typeof origin !== "object" || origin === null || !("kind" in origin)) return false;
+  return typeof origin.kind === "string" && origin.kind !== "human";
 }
 
 // Claude repeats session fields on records that need not be retained.
@@ -594,8 +634,9 @@ function parseAgentSessionRecords(
     if (input.source === "claudeAgent") {
       if (isHiddenClaudeRecord(record)) continue;
       if (record.type !== "user" && record.type !== "assistant") continue;
-      const text = extractText(record.message?.content);
-      if (text.length === 0) continue;
+      const extracted = extractText(record.message?.content);
+      const text = record.type === "user" ? claudeTypedText(extracted) : extracted;
+      if (text === null || text.length === 0) continue;
       retainMessage({
         role: record.type,
         text,
@@ -700,6 +741,9 @@ function shouldRetainDecodedRecord(
   if (source === "pi") return true;
   if (source === "claudeAgent") {
     if (isHiddenClaudeRecord(record) || (record.type !== "user" && record.type !== "assistant")) {
+      return false;
+    }
+    if (record.type === "user" && claudeTypedText(extractText(record.message?.content)) === null) {
       return false;
     }
     const content = record.message?.content;
@@ -2258,7 +2302,104 @@ export const make = Effect.gen(function* () {
     completedSources = [],
   ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
 
-  return AgentSessionScanner.of({ scan, recentThreads });
+  // Claude names each transcript after its session ID, so a session is found by file name.
+  const claudeSessionHistory: AgentSessionScanner["Service"]["claudeSessionHistory"] = Effect.fn(
+    "AgentSessionScanner.claudeSessionHistory",
+  )(
+    function* (input) {
+      if (!CLAUDE_TRANSCRIPT_SESSION_ID.test(input.sessionId)) return null;
+      const settings = yield* serverSettings.getSettings;
+      const instances = Object.entries(settings.providerInstances).filter(
+        ([, instance]) => instance.driver === "claudeAgent",
+      );
+      if (!Object.hasOwn(settings.providerInstances, "claudeAgent")) {
+        instances.push(["claudeAgent", { driver: ProviderDriverKind.make("claudeAgent") }]);
+      }
+      // Accounts can hold copies of one session. The thread's own account resumes from
+      // its copy, so that copy is shown; another account's newest copy is the fallback.
+      const homes: Array<{ readonly home: string; readonly own: boolean }> = [];
+      for (const [instanceId, instance] of instances) {
+        const config = decodeClaudeSettings(instance.config ?? {});
+        if (Option.isNone(config)) continue;
+        const configured = instance.environment?.findLast(
+          (variable) => variable.name === "CLAUDE_CONFIG_DIR",
+        )?.value;
+        const home = resolveClaudeConfigDir(
+          config.value.homePath,
+          typeof configured === "string" ? configured : hostEnvironment.CLAUDE_CONFIG_DIR,
+        );
+        const own = instanceId === input.providerInstanceId;
+        const seen = homes.findIndex((entry) => entry.home === home);
+        if (seen === -1) homes.push({ home, own });
+        else if (own) homes[seen] = { home, own };
+      }
+      const findCopy = Effect.fn("AgentSessionScanner.claudeSessionHistory.findCopy")(function* (
+        own: boolean,
+      ) {
+        let newest: { readonly filePath: string; readonly mtimeMs: number } | undefined;
+        for (const { home } of homes.filter((entry) => entry.own === own)) {
+          const projectsDir = path.join(home, "projects");
+          const projectsRoot = yield* fileSystem
+            .realPath(projectsDir)
+            .pipe(Effect.orElseSucceed(() => null));
+          if (projectsRoot === null) continue;
+          for (const entry of yield* listDirectory(projectsDir)) {
+            const filePath = path.join(projectsDir, entry, `${input.sessionId}.jsonl`);
+            const stats = yield* statOption(filePath);
+            if (Option.isNone(stats) || stats.value.type !== "File") continue;
+            // A linked folder must not lead outside Claude's projects folder.
+            const real = yield* fileSystem
+              .realPath(filePath)
+              .pipe(Effect.orElseSucceed(() => null));
+            if (real === null || !real.startsWith(`${projectsRoot}${path.sep}`)) continue;
+            const mtime = transcriptIdentity(filePath, stats.value).mtimeMs ?? 0;
+            if (newest === undefined || mtime > newest.mtimeMs) {
+              newest = { filePath: real, mtimeMs: mtime };
+            }
+          }
+        }
+        return newest;
+      });
+      const copy = (yield* findCopy(true)) ?? (yield* findCopy(false));
+      if (copy === undefined) return null;
+      // Claude may be writing the session right now; a read that sees the file change starts over.
+      let snapshot: Effect.Success<ReturnType<typeof readTranscript>> = null;
+      let identity: ReturnType<typeof transcriptIdentity> | undefined;
+      for (let attempt = 0; attempt < 3 && snapshot === null; attempt++) {
+        const stats = yield* statOption(copy.filePath);
+        if (Option.isNone(stats) || stats.value.type !== "File") return null;
+        identity = transcriptIdentity(copy.filePath, stats.value);
+        if (identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return null;
+        snapshot = yield* readTranscript(copy.filePath, identity, "claudeAgent").pipe(
+          importReadLock.withPermits(1),
+        );
+      }
+      if (snapshot === null || identity === undefined) return null;
+      const thread = parseAgentSessionRecords(
+        {
+          source: "claudeAgent",
+          providerInstanceId: input.providerInstanceId,
+          fallbackSessionId: input.sessionId,
+          lastActiveAtMs: identity.mtimeMs ?? (yield* Clock.currentTimeMillis),
+        },
+        snapshot.records,
+        snapshot.claudeFields,
+        snapshot.droppedMessageCount,
+      );
+      return thread === "empty" ? null : thread;
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not read a Claude session transcript", {
+            sessionId: input.sessionId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      ),
+  );
+
+  return AgentSessionScanner.of({ scan, recentThreads, claudeSessionHistory });
 });
 
 export const layer = Layer.effect(AgentSessionScanner, make).pipe(

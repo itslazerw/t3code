@@ -367,6 +367,142 @@ const layerReportingProcessRunner = (
   ).pipe(Layer.provide(ProcessRunner.layer), Layer.provide(NodeServices.layer));
 
 it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
+  describe("claudeSessionHistory", () => {
+    it.effect("reads a session by ID from its own account first, then another account", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const secondHomePath = yield* makeTempDir("t3code-claude-home-b-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const sessionId = "0f3c2b8e-4d1a-4c7e-9b2f-6a5d4e3c2b1a";
+        const line = (record: object) => `${JSON.stringify(record)}\n`;
+        const transcript = (answer: string) =>
+          line({
+            type: "user",
+            sessionId,
+            timestamp: "2026-01-01T00:00:00.000Z",
+            message: { role: "user", content: "Fix the build" },
+          }) +
+          line({
+            type: "assistant",
+            sessionId,
+            timestamp: "2026-01-01T00:01:00.000Z",
+            message: { role: "assistant", content: [{ type: "text", text: answer }] },
+          }) +
+          line({
+            type: "user",
+            sessionId,
+            origin: { kind: "task-notification" },
+            timestamp: "2026-01-01T00:02:00.000Z",
+            message: { role: "user", content: "<task-notification>done</task-notification>" },
+          }) +
+          line({
+            type: "user",
+            sessionId,
+            timestamp: "2026-01-01T00:02:30.000Z",
+            message: {
+              role: "user",
+              content:
+                "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>",
+            },
+          }) +
+          line({
+            type: "user",
+            sessionId,
+            timestamp: "2026-01-01T00:02:31.000Z",
+            message: {
+              role: "user",
+              content: "<local-command-stdout>Set model to opus</local-command-stdout>",
+            },
+          }) +
+          line({
+            type: "user",
+            sessionId,
+            origin: { kind: "human" },
+            timestamp: "2026-01-01T00:03:00.000Z",
+            message: { role: "user", content: "Thanks" },
+          });
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-work-a", `${sessionId}.jsonl`),
+          contents: transcript("Older copy"),
+          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+        });
+        yield* writeTranscript({
+          filePath: path.join(secondHomePath, "projects", "-work-a", `${sessionId}.jsonl`),
+          contents: transcript("Newer copy"),
+          mtimeMs: Date.parse("2026-02-01T00:00:00.000Z"),
+        });
+        const onlyInB = "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d";
+        yield* writeTranscript({
+          filePath: path.join(secondHomePath, "projects", "-work-b", `${onlyInB}.jsonl`),
+          contents: transcript("Only in B").replaceAll(sessionId, onlyInB),
+          mtimeMs: Date.parse("2026-02-01T00:00:00.000Z"),
+        });
+        // A linked folder that points outside the projects folder is ignored.
+        const outside = yield* makeTempDir("t3code-outside-");
+        const linked = "3b4c5d6e-7f8a-4b9c-8d1e-2f3a4b5c6d7e";
+        yield* writeTranscript({
+          filePath: path.join(outside, `${linked}.jsonl`),
+          contents: transcript("Outside").replaceAll(sessionId, linked),
+          mtimeMs: Date.parse("2026-02-01T00:00:00.000Z"),
+        });
+        NodeFS.symlinkSync(outside, path.join(claudeHomePath, "projects", "-linked"));
+        const history = yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const read = (instance: string, id: string) =>
+            scanner.claudeSessionHistory({
+              providerInstanceId: ProviderInstanceId.make(instance),
+              sessionId: id,
+            });
+          return {
+            own: yield* read("claudeAgent", sessionId),
+            ownB: yield* read("claudeB", sessionId),
+            fallback: yield* read("claudeAgent", onlyInB),
+            linked: yield* read("claudeAgent", linked),
+            found: yield* scanner.claudeSessionHistory({
+              providerInstanceId: ProviderInstanceId.make("claudeB"),
+              sessionId,
+            }),
+            missing: yield* scanner.claudeSessionHistory({
+              providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+              sessionId: "11111111-2222-4333-8444-555555555555",
+            }),
+            notAnId: yield* scanner.claudeSessionHistory({
+              providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+              sessionId: "../escape",
+            }),
+          };
+        }).pipe(
+          Effect.provide(
+            layerScannerTest({
+              claudeHomePath,
+              codexHomePath,
+              providerInstances: {
+                [ProviderInstanceId.make("claudeB")]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  config: { homePath: secondHomePath },
+                },
+              },
+            }),
+          ),
+        );
+        expect(history.own?.messages.map((message) => message.text)).toContain("Older copy");
+        expect(history.ownB?.messages.map((message) => message.text)).toContain("Newer copy");
+        expect(history.fallback?.messages.map((message) => message.text)).toContain("Only in B");
+        expect(history.linked).toBeNull();
+        expect(history.found?.providerSessionId).toBe(sessionId);
+        expect(history.found?.messages.map((message) => message.text)).toEqual([
+          "Fix the build",
+          "Newer copy",
+          "/model opus",
+          "Thanks",
+        ]);
+        expect(history.missing).toBeNull();
+        expect(history.notAnId).toBeNull();
+      }),
+    );
+  });
+
   describe("scan", () => {
     it.effect("reads Claude project cwds from transcripts, newest first", () =>
       Effect.gen(function* () {
