@@ -18,6 +18,7 @@ import {
 } from "react";
 import { Badge } from "../ui/badge";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ModelUsageHoverCard } from "./ModelUsageHoverCard";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -490,6 +491,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           <ChatGptSharingControl provider={activeEntry?.snapshot ?? null} />
         ) : null}
       </PopoverPopup>
+      <ModelUsageHoverCard
+        anchorRef={triggerRef}
+        enabled={props.isComposerOwned === true && !selectedEntries}
+        environmentId={props.environmentId}
+        instanceId={activeInstanceId}
+        pickerOpen={isMenuOpen}
+      />
     </Popover>
   );
 });
