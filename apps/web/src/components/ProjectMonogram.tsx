@@ -8,11 +8,29 @@ export function ProjectMonogram({
   text,
   color,
   className,
+  variant = "tile",
 }: {
   readonly text: string;
   readonly color: ProjectIconColor;
   readonly className?: string | undefined;
+  /** "bare": just the letters in the UI font, no tile, for places that draw their own. */
+  readonly variant?: "tile" | "bare" | undefined;
 }) {
+  if (variant === "bare") {
+    return (
+      <span
+        aria-hidden="true"
+        data-slot="project-monogram"
+        className={cn(
+          "inline-flex size-4 shrink-0 items-center justify-center whitespace-nowrap font-sans text-2xs leading-none select-none",
+          projectIconColorClassName(color),
+          className,
+        )}
+      >
+        {text}
+      </span>
+    );
+  }
   // Wrap the tile to avoid menu/button SVG margin trimming.
   return (
     <span

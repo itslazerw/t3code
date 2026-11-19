@@ -29,6 +29,7 @@ export interface PersistedUiState {
   defaultAdvertisedEndpointKey?: string | null;
   sidebarProjectScopeKey?: string | null;
   sidebarProjectScopeKeys?: string[];
+  projectStripSeeded?: boolean;
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
@@ -38,6 +39,8 @@ export interface UiProjectState {
   projectExpandedById: Record<string, boolean>;
   projectOrder: string[];
   sidebarProjectScopeKeys: string[];
+  /** The project strip was filled with recent projects once, or already had pins; never again. */
+  projectStripSeeded: boolean;
 }
 
 export interface UiThreadState {
@@ -60,6 +63,7 @@ const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   sidebarProjectScopeKeys: [],
+  projectStripSeeded: false,
   threadLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
@@ -153,6 +157,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     sidebarProjectScopeKeys: sanitizeStringArray(
       parsed.sidebarProjectScopeKeys ?? [parsed.sidebarProjectScopeKey],
     ),
+    projectStripSeeded: parsed.projectStripSeeded === true,
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
       ? parsed.pullRequestMergeMethod
       : initialState.pullRequestMergeMethod,
@@ -227,6 +232,7 @@ export function persistState(state: UiState): void {
           state.sidebarProjectScopeKeys.length === 1
             ? (state.sidebarProjectScopeKeys[0] ?? null)
             : null,
+        projectStripSeeded: state.projectStripSeeded,
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
@@ -431,6 +437,7 @@ interface UiStateStore extends UiState {
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   setProjectOrder: (projectOrder: readonly string[]) => void;
+  markProjectStripSeeded: () => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
     draggedProjectIds: readonly string[],
@@ -454,6 +461,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
   setProjectOrder: (projectOrder) => set({ projectOrder: [...projectOrder] }),
+  markProjectStripSeeded: () => set({ projectStripSeeded: true }),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>
     set((state) =>
       reorderProjects(state, currentProjectOrder, draggedProjectIds, targetProjectIds),

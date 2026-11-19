@@ -1422,6 +1422,15 @@ export function projectOrderWithGroupsFirst(
   return [...first, ...projectOrder.filter((key) => !moved.has(key))];
 }
 
+/** First run: the projects to pin into an empty strip, most recently used first; none once any is pinned. */
+export function pickProjectStripSeed<
+  TProject extends LogicalSidebarProject & { readonly pinned: boolean },
+  TThread extends ScopedSidebarThread,
+>(projects: readonly TProject[], threads: readonly TThread[], count = 5): TProject[] {
+  if (projects.some((project) => project.pinned)) return [];
+  return sortLogicalProjectsForSidebar(projects, threads, "updated_at").slice(0, count);
+}
+
 export function sortLogicalProjectsForSidebar<
   TProject extends LogicalSidebarProject,
   TThread extends ScopedSidebarThread,

@@ -37,6 +37,7 @@ import {
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
   orderPinnedProjectGroups,
+  pickProjectStripSeed,
   placeStripProjectKey,
   projectOrderWithGroupsFirst,
 } from "./Sidebar.logic";
@@ -836,6 +837,42 @@ describe("sortSidebarV2ProjectGroups", () => {
         (project) => project.projectKey,
       ),
     ).toEqual(["logical-newer", "logical-older"]);
+  });
+});
+
+describe("pickProjectStripSeed", () => {
+  const projects = Array.from({ length: 7 }, (_, index) => {
+    const id = ProjectId.make(`project-${index}`);
+    return {
+      ...makeProject({ id, title: `Project ${index}` }),
+      projectKey: `logical-${index}`,
+      memberProjectRefs: [{ environmentId: localEnvironmentId, projectId: id }],
+      pinned: false,
+    };
+  });
+  // Project 6 was used last, then 5, and so on.
+  const threads = projects.map((project, index) =>
+    makeThread({
+      id: ThreadId.make(`thread-${index}`),
+      projectId: project.id,
+      updatedAt: `2026-03-09T10:0${index}:00.000Z`,
+    }),
+  );
+
+  it("picks the 5 most recently used projects for an empty strip", () => {
+    expect(pickProjectStripSeed(projects, threads).map((project) => project.projectKey)).toEqual([
+      "logical-6",
+      "logical-5",
+      "logical-4",
+      "logical-3",
+      "logical-2",
+    ]);
+  });
+
+  it("picks nothing once any project is pinned", () => {
+    expect(
+      pickProjectStripSeed([{ ...projects[0]!, pinned: true }, ...projects.slice(1)], threads),
+    ).toEqual([]);
   });
 });
 

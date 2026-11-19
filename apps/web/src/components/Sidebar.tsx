@@ -68,8 +68,8 @@ import {
 import {
   CheckIcon,
   ChevronDownIcon,
+  EllipsisIcon,
   FolderIcon,
-  ListFilterIcon,
   PlusIcon,
   SettingsIcon,
 } from "lucide-react";
@@ -191,6 +191,7 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   orderPinnedProjectGroups,
+  pickProjectStripSeed,
   placeStripProjectKey,
   projectOrderWithGroupsFirst,
   planSidebarThreadDrop,
@@ -256,8 +257,12 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
-import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
-import { PROJECT_STRIP_DRAG_TYPE, SidebarProjectStrip } from "./sidebar/SidebarProjectStrip";
+import { SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
+import {
+  PROJECT_STRIP_DRAG_TYPE,
+  ProjectStripButton,
+  SidebarProjectStrip,
+} from "./sidebar/SidebarProjectStrip";
 import { TooltipProvider } from "./ui/tooltip";
 import {
   composerDraftHasUserContent,
@@ -1193,6 +1198,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       projectScopeFilter.contains(item, query, (candidate) => candidate.label),
   });
   const scopedProjectGroups = revealWidensScope ? [] : chosenProjectGroups;
+  const unpinnedScopedGroups = scopedProjectGroups.filter((project) => !project.pinned);
   const scopedProjectRefs = scopedProjectGroups.flatMap((project) => project.memberProjectRefs);
   const scopedProjectKeys = revealWidensScope ? null : chosenScopeProjectKeys;
   const threadSearch = useThreadSearch(
@@ -1322,6 +1328,34 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     setProjectOrder(projectOrderWithGroupsFirst(ordered, projectOrder));
     if (!group.pinned) setProjectGroupPinned(group, true);
   };
+  // First run: an empty strip gets the 5 most recently used projects, once. Unpinning later
+  // never refills it, and a strip that already had pins counts as seeded.
+  const projectStripSeeded = useUiStateStore((store) => store.projectStripSeeded);
+  const markProjectStripSeeded = useUiStateStore((store) => store.markProjectStripSeeded);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- one-time write to server pins once every project snapshot has loaded
+  useEffect(() => {
+    if (projectStripSeeded || !allProjectSnapshotsReady || pickableGroups.length === 0) return;
+    if (pickableGroups.some((group) => group.pinned)) {
+      markProjectStripSeeded();
+      return;
+    }
+    // Wait for a server that can pin rather than mark it seeded with nothing pinned.
+    const seed = pickProjectStripSeed(pickableGroups.filter(canPinProject), threads);
+    if (seed.length === 0) return;
+    markProjectStripSeeded();
+    setProjectOrder(projectOrderWithGroupsFirst(seed, projectOrder));
+    for (const group of seed) setProjectGroupPinned(group, true);
+  }, [
+    projectStripSeeded,
+    allProjectSnapshotsReady,
+    pickableGroups,
+    canPinProject,
+    threads,
+    markProjectStripSeeded,
+    setProjectOrder,
+    projectOrder,
+    setProjectGroupPinned,
+  ]);
 
   const {
     workingShelfEnabled,
@@ -2997,7 +3031,46 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           <SidebarGroup className="z-[1]">
             <SidebarThreadHeader
               hasProjects={projectGroups.length > 0}
-              projectScope={
+              onNewProject={openAddProjectCommandPalette}
+              onNewThread={handleNewThreadClick}
+              newThreadDisabled={projects.length === 0}
+              newThreadShortcutLabel={newThreadShortcutLabel}
+              newThreadInProjectShortcutLabel={newThreadInProjectShortcutLabel}
+              showNewThreadInProjectHint={
+                !shouldCreateNewThreadInCurrentProject(
+                  false,
+                  scopeGroups.length,
+                  projectGroups.length,
+                )
+              }
+              searchInputRef={threadSearchInputRef}
+              searchQuery={threadSearchQuery}
+              onSearchQueryChange={(value) => {
+                setThreadSearchQuery(value);
+                setSearchHighlightKey(null);
+              }}
+              onSearchKeyDown={handleThreadSearchKeyDown}
+              isSearching={isSearchingThreads}
+              searchResultCount={threadSearchResults.length}
+              activeSearchResultIndex={activeSearchResultIndex}
+              onClearSearch={clearThreadSearch}
+            />
+            <SidebarProjectStrip
+              projects={pickableGroups}
+              selectedKeys={projectScopeKeys}
+              onShowAll={() => setProjectScopeKeys([])}
+              onShowOnly={(key) => setProjectScopeKeys([key])}
+              onToggle={toggleProjectScopeKey}
+              onContextMenu={(key, position, source) => {
+                const group = projectGroupByScopeKey.get(key);
+                if (group) handleProjectFolderContextMenu(group, position, source);
+              }}
+              onPlace={placeStripProject}
+              onUnpin={(key) => {
+                const group = projectGroupByScopeKey.get(key);
+                if (group?.pinned && canPinProject(group)) setProjectGroupPinned(group, false);
+              }}
+              more={
                 <Combobox
                   items={projectScopeItems}
                   filteredItems={filteredProjectScopeItems}
@@ -3034,38 +3107,29 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     }
                   }}
                 >
+                  {/* Chosen projects with no strip icon show here, so the filter is never hidden. */}
                   <ComboboxTrigger
                     render={
-                      <SidebarHeaderIconButton
+                      <ProjectStripButton
                         label={
-                          scopedProjectGroups.length > 0
-                            ? `Filter threads by project: ${scopedProjectGroups.map((project) => project.displayName).join(", ")}`
-                            : "Filter threads by project"
+                          unpinnedScopedGroups.length > 0
+                            ? `All projects… Showing ${unpinnedScopedGroups.map((project) => project.displayName).join(", ")}`
+                            : "All projects…"
                         }
+                        selected={unpinnedScopedGroups.length > 0}
+                        aria-pressed={undefined}
                       />
                     }
                   >
-                    {scopedProjectGroups.length > 1 ? (
-                      <span className="flex shrink-0">
-                        {scopedProjectGroups.slice(0, 2).map((project, index) => (
-                          <span
-                            key={project.projectKey}
-                            className={
-                              index === 0
-                                ? "flex"
-                                : "-ml-1 flex rounded-[25%] bg-sidebar ring-2 ring-sidebar"
-                            }
-                          >
-                            <ProjectFavicon project={project} className="size-3.5" />
-                          </span>
-                        ))}
-                      </span>
-                    ) : scopedProjectGroups[0] ? (
-                      <span className="flex shrink-0">
-                        <ProjectFavicon project={scopedProjectGroups[0]} className="size-4" />
-                      </span>
+                    {/* The first such project; the label names them all. */}
+                    {unpinnedScopedGroups[0] ? (
+                      <ProjectFavicon
+                        project={unpinnedScopedGroups[0]}
+                        className="size-4 shrink-0"
+                        monogramVariant="bare"
+                      />
                     ) : (
-                      <ListFilterIcon className="size-4" />
+                      <EllipsisIcon className="size-4 shrink-0" />
                     )}
                   </ComboboxTrigger>
                   {/* Refocusing the trigger after a pointer close shows its focus ring and opens its tooltip. */}
@@ -3212,45 +3276,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   </ComboboxPopup>
                 </Combobox>
               }
-              onNewProject={openAddProjectCommandPalette}
-              onNewThread={handleNewThreadClick}
-              newThreadDisabled={projects.length === 0}
-              newThreadShortcutLabel={newThreadShortcutLabel}
-              newThreadInProjectShortcutLabel={newThreadInProjectShortcutLabel}
-              showNewThreadInProjectHint={
-                !shouldCreateNewThreadInCurrentProject(
-                  false,
-                  scopeGroups.length,
-                  projectGroups.length,
-                )
-              }
-              searchInputRef={threadSearchInputRef}
-              searchQuery={threadSearchQuery}
-              onSearchQueryChange={(value) => {
-                setThreadSearchQuery(value);
-                setSearchHighlightKey(null);
-              }}
-              onSearchKeyDown={handleThreadSearchKeyDown}
-              isSearching={isSearchingThreads}
-              searchResultCount={threadSearchResults.length}
-              activeSearchResultIndex={activeSearchResultIndex}
-              onClearSearch={clearThreadSearch}
-            />
-            <SidebarProjectStrip
-              projects={pickableGroups}
-              selectedKeys={projectScopeKeys}
-              onShowAll={() => setProjectScopeKeys([])}
-              onShowOnly={(key) => setProjectScopeKeys([key])}
-              onToggle={toggleProjectScopeKey}
-              onContextMenu={(key, position, source) => {
-                const group = projectGroupByScopeKey.get(key);
-                if (group) handleProjectFolderContextMenu(group, position, source);
-              }}
-              onPlace={placeStripProject}
-              onUnpin={(key) => {
-                const group = projectGroupByScopeKey.get(key);
-                if (group?.pinned && canPinProject(group)) setProjectGroupPinned(group, false);
-              }}
             />
           </SidebarGroup>
         }

@@ -20,6 +20,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     sidebarProjectScopeKeys: [],
+    projectStripSeeded: false,
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
     defaultAdvertisedEndpointKey: null,
@@ -126,6 +127,7 @@ describe("parsePersistedState", () => {
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKeys: [],
+      projectStripSeeded: false,
       pullRequestMergeMethod: "merge",
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -238,6 +240,7 @@ describe("uiStateStore persistence", () => {
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKeys: [],
       sidebarProjectScopeKey: null,
+      projectStripSeeded: false,
       threadChangedFilesExpansionVersion: 2,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -250,6 +253,15 @@ describe("uiStateStore persistence", () => {
     expect(parsePersistedState(persisted)).toEqual({
       ...state,
     });
+  });
+
+  it("remembers that the project strip was seeded", () => {
+    persistState(makeUiState({ projectStripSeeded: true }));
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(parsePersistedState(persisted).projectStripSeeded).toBe(true);
+    expect(parsePersistedState({}).projectStripSeeded).toBe(false);
   });
 
   it("restores the sidebar project scope across reloads", () => {
