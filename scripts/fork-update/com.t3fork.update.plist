@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hourly update check. Replace REPLACE_WITH_CLONE_PATH with where you cloned the fork, copy this
+     file to ~/Library/LaunchAgents/, then: launchctl load ~/Library/LaunchAgents/com.t3fork.update.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.t3fork.update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>REPLACE_WITH_CLONE_PATH/scripts/fork-update/t3-fork-update</string>
+    <string>check</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

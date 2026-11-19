@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""t3-fork-update: keeps this fork's T3 Code app on every official release. Mac (Apple Silicon) only.
+
+For each new official release it:
+  1. downloads the release from github.com/pingdotgg/t3code and checks Apple's signature,
+  2. puts this fork's commits on top of that release's code (a commit that no longer fits is
+     left out, and you get a notification naming it),
+  3. builds, swaps the new server and web code into a copy of the official app, signs it,
+     and test-starts its server on a copy of your data,
+  4. puts it in place the next time T3 is closed (or now, with `restart`).
+The official updater is switched off inside the fork's build, since it would put the plain
+release back; this script does the updating instead.
+
+    t3-fork-update status          what is installed, what waits
+    t3-fork-update check [--force] look for a new release (hourly unless --force) and prepare it
+    t3-fork-update prepare VER     build release VER with the fork's changes (e.g. 0.1.10)
+    t3-fork-update swap            put a prepared build in place if T3 is closed
+    t3-fork-update restart         quit T3, put the waiting build in, open it again (not while a chat works)
+    t3-fork-update stock           go back to the plain official T3
+
+Needs: git, node, and vite-plus (`npm install -g vite-plus@1.4.0`, the build tool T3 uses).
+Files: ~/Library/Application Support/t3-fork (builds, backups, state.json, log).
+"""
+import datetime as dt
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=HERE, capture_output=True,
+                      text=True).stdout.strip()
+ROOT = os.path.expanduser("~/Library/Application Support/t3-fork")
+SRC = f"{ROOT}/src"
+UPSTREAM = "https://github.com/pingdotgg/t3code.git"
+APP = "/Applications/T3 Code (Beta).app"
+TEAM = "ARK85ZXQ4Z"  # T3's Apple team; a download must be signed by it
+STATE = f"{ROOT}/state.json"
+LOG = f"{ROOT}/t3-fork-update.log"
+USERDATA = os.path.expanduser("~/.t3/userdata")
+CHECK_EVERY = 3600
+KEEP_BACKUPS = 2
+
+
+def log(msg):
+    os.makedirs(ROOT, exist_ok=True)
+    line = f"[{time.strftime('%F %T')}] {msg}"
+    with open(LOG, "a") as fh:
+        fh.write(line + "\n")
+    print(line)
+
+
+def notify(title, text):
+    script = f"display notification {json.dumps(text[:200])} with title {json.dumps(title)}"
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+    log(f"{title}: {text}")
+
+
+def load():
+    try:
+        return json.load(open(STATE))
+    except FileNotFoundError:
+        return {}
+
+
+def save(state):
+    os.makedirs(ROOT, exist_ok=True)
+    json.dump(state, open(STATE + ".tmp", "w"), indent=1)
+    os.replace(STATE + ".tmp", STATE)
+
+
+def sh(args, cwd=None, check=True, env=None, timeout=None):
+    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=env, timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"{' '.join(args[:3])}... failed: {(r.stderr or r.stdout).strip()[-400:]}")
+    return r
+
+
+def vkey(v):
+    base, _, pre = v.partition("-")
+    nums = tuple(int(x) for x in base.split("."))
+    return nums + ((1,) if not pre else (0,) + tuple(int(x) for x in pre.split(".")[1:] if x.isdigit()))
+
+
+def app_version(app):
+    return sh(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString",
+               f"{app}/Contents/Info.plist"]).stdout.strip()
+
+
+def t3_running():
+    out = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
+    return any(line.startswith(APP + "/") for line in out.splitlines())
+
+
+def latest_release():
+    req = urllib.request.Request("https://api.github.com/repos/pingdotgg/t3code/releases/latest",
+                                 headers={"User-Agent": "t3-fork-update", "Accept": "application/vnd.github+json"})
+    data = json.load(urllib.request.urlopen(req, timeout=30))
+    ver = data["tag_name"].lstrip("v")
+    want = f"T3-Code-{ver}-arm64.zip"
+    return ver, next((a["browser_download_url"] for a in data["assets"] if a["name"] == want), None)
+
+
+def verify_official(app):
+    sh(["codesign", "--verify", "--deep", "--strict", app])
+    if f"TeamIdentifier={TEAM}" not in sh(["codesign", "-dv", app]).stderr:
+        raise RuntimeError("download is not signed by the T3 team")
+    sh(["spctl", "--assess", "--type", "execute", app])
+
+
+def fetch_official(ver):
+    app = f"{ROOT}/official/{ver}/T3 Code (Beta).app"
+    if os.path.isdir(app):
+        verify_official(app)
+        return app
+    url = f"https://github.com/pingdotgg/t3code/releases/download/v{ver}/T3-Code-{ver}-arm64.zip"
+    tmp = tempfile.mkdtemp(dir=ROOT, prefix=".download-")
+    try:
+        log(f"downloading {url}")
+        urllib.request.urlretrieve(url, f"{tmp}/t3.zip")
+        sh(["ditto", "-x", "-k", f"{tmp}/t3.zip", tmp])
+        found = glob.glob(f"{tmp}/*.app")
+        if not found:
+            raise RuntimeError("release zip has no app")
+        verify_official(found[0])
+        os.makedirs(os.path.dirname(app), exist_ok=True)
+        os.rename(found[0], app)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    log(f"official {ver} downloaded, signature checked")
+    return app
+
+
+def fork_commits():
+    """This fork's own commits: everything on the fork's branch after the release it sits on."""
+    branch = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO).stdout.strip()
+    sh(["git", "pull", "--quiet", "--ff-only"], cwd=REPO, check=False)
+    sh(["git", "fetch", "--quiet", "--tags", UPSTREAM], cwd=REPO)
+    base = sh(["git", "describe", "--tags", "--abbrev=0", "--match", "v*", branch], cwd=REPO).stdout.strip()
+    return sh(["git", "rev-list", "--reverse", f"{base}..{branch}"], cwd=REPO).stdout.split()
+
+
+def apply_commits(ver):
+    if not os.path.isdir(SRC):
+        sh(["git", "worktree", "add", "--detach", SRC, f"v{ver}"], cwd=REPO)
+    sh(["git", "cherry-pick", "--abort"], cwd=SRC, check=False)
+    sh(["git", "checkout", "--quiet", "--detach", f"v{ver}"], cwd=SRC)
+    applied, dropped = [], []
+    for c in fork_commits():
+        subject = sh(["git", "log", "-1", "--format=%s", c], cwd=REPO).stdout.strip()
+        if sh(["git", "cherry-pick", "--allow-empty", c], cwd=SRC, check=False).returncode == 0:
+            applied.append(subject)
+        else:
+            sh(["git", "cherry-pick", "--abort"], cwd=SRC, check=False)
+            dropped.append(subject)
+    return applied, dropped
+
+
+def build_and_assemble(official, out):
+    if not shutil.which("vp"):
+        raise RuntimeError("vite-plus is missing: npm install -g vite-plus@1.4.0")
+    env = dict(os.environ, PATH=f"{SRC}/node_modules/.bin:{os.environ.get('PATH', '')}")
+    log("installing packages")
+    sh(["nice", "-n", "15", "vp", "install"], cwd=SRC, env=env, timeout=3600)
+    log("building")
+    sh(["nice", "-n", "15", "vp", "run", "--filter", "t3", "build"], cwd=SRC, env=env, timeout=3600)
+    asar = sorted(glob.glob(f"{SRC}/node_modules/.pnpm/@electron+asar@3.*/node_modules/@electron/asar"))
+    if not asar:
+        raise RuntimeError("no @electron/asar in the build's packages")
+    sh(["nice", "-n", "10", "node", f"{HERE}/assemble.mjs", official, f"{SRC}/apps/server/dist", out, asar[-1]],
+       timeout=1800)
+
+
+def smoke(app):
+    """The built app's server must start on a copy of your data within 90 seconds."""
+    home = tempfile.mkdtemp(dir=ROOT, prefix=".smoke-")
+    os.makedirs(f"{home}/userdata")
+    if os.path.exists(f"{USERDATA}/statev2.sqlite"):
+        sh(["sqlite3", f"{USERDATA}/statev2.sqlite", f".backup '{home}/userdata/statev2.sqlite'"])
+    exe = sh(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleExecutable", f"{app}/Contents/Info.plist"]).stdout.strip()
+    out = open(f"{home}/server.log", "w")
+    p = subprocess.Popen([f"{app}/Contents/MacOS/{exe}", f"{app}/Contents/Resources/app.asar/apps/server/dist/bin.mjs",
+                          "serve", "--mode", "web", "--base-dir", home, "--port", "17790", "--host", "127.0.0.1",
+                          "--no-browser"], env=dict(os.environ, ELECTRON_RUN_AS_NODE="1"), stdout=out,
+                         stderr=subprocess.STDOUT)
+    ok = False
+    try:
+        for _ in range(90):
+            time.sleep(1)
+            if p.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:17790/", timeout=3) as r:
+                    ok = r.status == 200 and b"<html" in r.read(4096).lower()
+            except Exception:
+                pass
+            if ok:
+                break
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        out.close()
+        tail = open(f"{home}/server.log").read()[-600:]
+        shutil.rmtree(home, ignore_errors=True)
+    if not ok:
+        raise RuntimeError(f"built app's server did not start: {tail}")
+
+
+def prepare(ver):
+    official = fetch_official(ver)
+    out = f"{ROOT}/stage/{ver}/T3 Code (Beta).app"
+    try:
+        applied, dropped = apply_commits(ver)
+        if not applied:
+            raise RuntimeError("none of the fork's changes fit this release")
+        build_and_assemble(official, out)
+        smoke(out)
+        staged = {"version": ver, "kind": "fork", "path": out, "dropped": dropped}
+        log(f"{ver} ready with the fork's changes ({len(applied)} in, {len(dropped)} left out)")
+        if dropped:
+            notify(f"T3 {ver}: {len(dropped)} fork changes left out", "; ".join(dropped))
+    except Exception as e:
+        staged = {"version": ver, "kind": "official", "path": official, "reason": str(e)[:300]}
+        notify(f"T3 {ver}: plain official update", f"The fork's build failed, so the official release goes in: {e}")
+    state = load()
+    state["staged"] = staged
+    save(state)
+
+
+def backup_userdata():
+    if not os.path.exists(f"{USERDATA}/statev2.sqlite"):
+        return
+    dest = f"{ROOT}/backups/userdata-{dt.datetime.now():%Y%m%d-%H%M%S}"
+    os.makedirs(dest)
+    sh(["sqlite3", f"{USERDATA}/statev2.sqlite", f".backup '{dest}/statev2.sqlite'"])
+    sh(["rsync", "-a", "--exclude", "statev2.sqlite*", "--exclude", "logs", f"{USERDATA}/", f"{dest}/"])
+    for old in sorted(glob.glob(f"{ROOT}/backups/userdata-*"))[:-KEEP_BACKUPS]:
+        shutil.rmtree(old, ignore_errors=True)
+    log(f"T3 data backed up to {dest}")
+
+
+def install(path, kind):
+    if t3_running():
+        raise RuntimeError("T3 is open")
+    backup_userdata()
+    prev = f"{ROOT}/previous/T3 Code (Beta).app"
+    shutil.rmtree(prev, ignore_errors=True)
+    os.makedirs(os.path.dirname(prev), exist_ok=True)
+    if os.path.exists(APP):
+        sh(["ditto", APP, prev])
+    tmp = APP + ".t3-fork-new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    sh(["ditto", path, tmp])
+    if os.path.exists(APP):
+        shutil.rmtree(APP)
+    os.rename(tmp, APP)
+    log(f"installed {kind} {app_version(APP)} (the one before is kept in {prev})")
+
+
+def prune():
+    state = load()
+    keep = {state.get("installed", {}).get("version"), state.get("staged", {}).get("version")}
+    for kind in ("official", "stage"):
+        vers = sorted((os.path.basename(d) for d in glob.glob(f"{ROOT}/{kind}/*")), key=vkey)
+        for v in [v for v in vers[:-2] if v not in keep]:
+            shutil.rmtree(f"{ROOT}/{kind}/{v}", ignore_errors=True)
+
+
+def swap():
+    state = load()
+    staged = state.get("staged")
+    if not staged or t3_running():
+        return False
+    install(staged["path"], staged["kind"])
+    state["installed"] = {k: staged[k] for k in ("version", "kind", "dropped") if k in staged}
+    state.pop("staged", None)
+    save(state)
+    prune()
+    return True
+
+
+def busy_chats():
+    """Chats working right now, read from T3's own database."""
+    q = ("select t.title from orchestration_v2_projection_runs r join orchestration_v2_projection_threads t "
+         "on t.thread_id = r.thread_id where json_extract(r.payload_json, '$.status') in "
+         "('preparing','starting','running','waiting') and json_extract(t.payload_json, '$.updatedAt') > "
+         "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes')")
+    r = subprocess.run(["sqlite3", "-readonly", f"{USERDATA}/statev2.sqlite", q], capture_output=True, text=True)
+    return sorted(set(line for line in r.stdout.splitlines() if line.strip()))
+
+
+def restart():
+    if not load().get("staged"):
+        print("nothing waiting to go in")
+        return
+    busy = busy_chats()
+    if busy:
+        print("not now, these chats are working: " + ", ".join(busy))
+        return
+    subprocess.run(["osascript", "-e", 'quit app "T3 Code (Beta)"'], capture_output=True, timeout=60)
+    for _ in range(60):
+        if not t3_running():
+            break
+        time.sleep(1)
+    if t3_running():
+        print("T3 did not close, nothing changed")
+        return
+    done = swap()
+    subprocess.run(["open", "-g", "-a", APP])
+    print("done, T3 is open again" if done else "T3 reopened, nothing swapped")
+
+
+def check(force=False):
+    state = load()
+    if not force and time.time() - state.get("last_check", 0) < CHECK_EVERY:
+        return
+    state["last_check"] = time.time()
+    save(state)
+    ver, url = latest_release()
+    # First run counts as nothing installed, so the fork gets built even when the official app is current.
+    have = state.get("installed", {}).get("version", "0.0.0")
+    if vkey(ver) <= vkey(have) or ver == state.get("staged", {}).get("version"):
+        swap()
+        return
+    if not url:
+        log(f"release {ver} has no Mac arm64 download yet")
+        return
+    log(f"new T3 release {ver} (have {have})")
+    prepare(ver)
+    swap()
+
+
+def stock():
+    """Back to the plain official T3 of the installed version."""
+    if t3_running():
+        print("close T3 first")
+        return
+    ver = load().get("installed", {}).get("version") or latest_release()[0]
+    install(fetch_official(ver), "official")
+    state = load()
+    state["installed"] = {"version": ver, "kind": "official"}
+    state["stock"] = True
+    save(state)
+    print(f"plain official T3 {ver} is back; remove the hourly check to stop fork updates")
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "--help"
+    if cmd == "status":
+        print(json.dumps({k: v for k, v in load().items() if k != "last_check"}, indent=1) or "{}")
+    elif cmd == "check":
+        if not load().get("stock"):
+            check(force="--force" in args)
+    elif cmd == "prepare" and len(args) == 2:
+        prepare(args[1].lstrip("v"))
+    elif cmd == "swap":
+        print("swapped" if swap() else "nothing swapped (nothing waiting, or T3 is open)")
+    elif cmd == "restart":
+        restart()
+    elif cmd == "stock":
+        stock()
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()
