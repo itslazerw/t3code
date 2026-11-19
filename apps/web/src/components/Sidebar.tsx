@@ -1334,7 +1334,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const markProjectStripSeeded = useUiStateStore((store) => store.markProjectStripSeeded);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- one-time write to server pins once every project snapshot has loaded
   useEffect(() => {
-    if (projectStripSeeded || !allProjectSnapshotsReady || pickableGroups.length === 0) return;
+    // Read the store itself too: a replayed effect still holds the old snapshot and would pin twice.
+    if (projectStripSeeded || useUiStateStore.getState().projectStripSeeded) return;
+    if (!allProjectSnapshotsReady || pickableGroups.length === 0) return;
     if (pickableGroups.some((group) => group.pinned)) {
       markProjectStripSeeded();
       return;
