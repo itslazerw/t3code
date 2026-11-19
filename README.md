@@ -1,3 +1,5 @@
+> **This is a fork of T3 Code with a few small fixes.** See [FORK.md](FORK.md) for what is different and how to install it.
+
 <p align="center">
   <a href="https://t3.codes">
     <img src="./assets/prod/t3-black-web-icon-192x192.png" width="80" height="80" alt="T3 Code logo" />
