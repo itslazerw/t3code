@@ -90,6 +90,7 @@ import {
   deriveLatestThreadRun,
   deriveThreadStructureRuntime,
   limitRecoveryOwnsSnooze,
+  presentPendingBackgroundWork,
 } from "@t3tools/client-runtime/state/thread-execution";
 import {
   resolveWorkflowOpening,
@@ -1511,6 +1512,11 @@ export default function ChatView(props: ChatViewProps) {
     activeProviderThread,
   );
   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
+  const backgroundCommands = (
+    presentPendingBackgroundWork(pendingBackgroundTasks)?.items ?? []
+  ).flatMap(({ kind, taskId, label }) =>
+    kind === "command" || kind === "monitor" ? [{ taskId, label }] : [],
+  );
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
@@ -3478,6 +3484,7 @@ export default function ChatView(props: ChatViewProps) {
                     : {})}
                   {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                   isPreparingWorktree={isPreparingWorktree}
+                  backgroundCommands={backgroundCommands}
                   footer={timelineFooter}
                   listRef={legendListRef}
                   runs={serverProjection?.runs ?? []}

@@ -91,6 +91,7 @@ export interface TimelineRowSharedState {
     | ((input: { readonly sourceThreadId: ThreadId; readonly runId: RunId }) => Promise<void>)
     | undefined;
   onToggleTurnFold: (runId: RunId) => void;
+  onToggleQuietFold: (row: Extract<MessagesTimelineRow, { kind: "quiet-fold" }>) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
@@ -106,6 +107,11 @@ export interface TimelineRowSharedState {
   workGroupViewState: WorkGroupViewState;
 }
 
+export type BackgroundCommandsList = ReadonlyArray<{
+  readonly taskId: string;
+  readonly label: string;
+}>;
+
 export interface TimelineRowActivityState {
   isWorking: boolean;
   isCompacting: boolean;
@@ -115,6 +121,8 @@ export interface TimelineRowActivityState {
   providerStartingLabel: string | null;
   latestRunId: RunId | null;
   backgroundWorktreeSetup: WorktreeSetupSnapshot | null;
+  /** Background commands still running while the turn works, shown on the working row. */
+  backgroundCommands: BackgroundCommandsList;
   liveAnswerPreview: string | null;
 }
 

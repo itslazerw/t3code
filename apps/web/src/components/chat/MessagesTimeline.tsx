@@ -90,6 +90,7 @@ import {
   type MessagesTimelineRow,
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
+import { dedupeSubagentRows, foldQuietTimelineRows } from "./TimelineQuietRows.logic";
 import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
 import { TooltipScrollDismissArea } from "../ui/tooltip";
@@ -106,6 +107,7 @@ import { TimelineMinimap } from "./TimelineMinimap";
 import {
   type TimelineRowSharedState,
   type TimelineRowActivityState,
+  type BackgroundCommandsList,
   TimelineRowCtx,
   TimelineRowActivityCtx,
   type WorkGroupViewState,
@@ -243,6 +245,8 @@ interface MessagesTimelineProps {
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
   isPreparingWorktree?: boolean;
+  /** Background commands still running; the working row counts them. */
+  backgroundCommands?: BackgroundCommandsList;
   isCompacting?: boolean;
   awaitingUser?: "approval" | "input" | null;
   /** Which request is waiting, so a second one of the same kind is announced too. */
@@ -328,6 +332,8 @@ interface MessagesTimelineProps {
   findNavigationId?: number;
 }
 
+const EMPTY_LABELS: BackgroundCommandsList = [];
+
 export function MessagesTimeline(props: MessagesTimelineProps) {
   const find = useContext(ThreadFindTimelineContext);
   const findOpen = find?.findOpen ?? props.findOpen;
@@ -362,6 +368,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
   isPreparingWorktree = false,
+  backgroundCommands = EMPTY_LABELS,
   isCompacting = false,
   awaitingUser = null,
   awaitingRequestId = null,
@@ -567,6 +574,23 @@ const ConversationTimeline = memo(function ConversationTimeline({
       return next;
     });
   };
+  const onToggleQuietFold = (row: Extract<TimelineRow, { kind: "quiet-fold" }>) => {
+    preserveDisclosurePosition(row.id);
+    setExpandedWorkGroupIds((existing) => {
+      const next = new Set(existing);
+      if (row.expanded) next.delete(row.id);
+      else next.add(row.id);
+      return next;
+    });
+    // A fold held open by a turn opened inside it closes with that turn.
+    if (row.expanded && row.runIds.length > 0) {
+      setExpandedRunIds((existing) => {
+        const next = new Set(existing);
+        for (const runId of row.runIds) next.delete(runId);
+        return next;
+      });
+    }
+  };
   const onToggleWorkGroup = (groupId: string, anchorKey: string) => {
     preserveDisclosurePosition(
       anchorKey,
@@ -754,7 +778,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     toolCallVisibility,
     revealedMessageId,
   });
-  const rows = useStableRows(rawRows, listIdentityKey);
+  const stableRows = useStableRows(rawRows, listIdentityKey);
+  const rows = foldQuietTimelineRows(dedupeSubagentRows(stableRows), expandedWorkGroupIds);
   const matchedApprovalRequestIds = new Set<string>();
   for (const row of pendingApprovalRequestIds.size > 0 ? rows : []) {
     const entries =
@@ -1132,6 +1157,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     workflowOpening,
     onForkFromRun,
     onToggleTurnFold,
+    onToggleQuietFold,
     onToggleAttemptFold,
     onToggleWorkGroup,
     onToggleWorkEntry: (anchorKey, collapsed, entryId) =>
@@ -1175,6 +1201,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     isCompacting: compactionAwaitingRow,
     isRevertingCheckpoint,
     backgroundWorktreeSetup,
+    backgroundCommands: isWorking ? backgroundCommands : EMPTY_LABELS,
     awaitingUser: awaitingUser !== null,
     isPreparingWorktree,
     providerStartingLabel,
@@ -1722,6 +1749,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         </WorkLogBlock>
       ) : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow key={row.id} row={row} /> : null}
+      {row.kind === "quiet-fold" ? <QuietFoldTimelineRow row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserMessageRow row={row} /> : null}
@@ -1904,6 +1932,28 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
         />
       </div>
       {loading ? <WorkHistorySkeleton /> : null}
+    </div>
+  );
+}
+
+function QuietFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "quiet-fold" }> }) {
+  const ctx = use(TimelineRowCtx);
+  return (
+    <div className="group/timeline-row pb-2 pe-0.5 pt-1">
+      <button
+        type="button"
+        aria-expanded={row.expanded}
+        data-scroll-anchor-ignore
+        onClick={() => ctx.onToggleQuietFold(row)}
+        className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground/80 tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+      >
+        <span>{row.label}</span>
+        {row.expanded ? (
+          <ChevronDownIcon className="size-3.5" />
+        ) : (
+          <ChevronRightIcon className="size-3.5" />
+        )}
+      </button>
     </div>
   );
 }

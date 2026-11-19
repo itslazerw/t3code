@@ -344,6 +344,22 @@ describe("MessagesTimeline work rows", () => {
     });
   });
 
+  it("counts running background commands on the working line and lists them on click", async () => {
+    const runId = RunId.make("live-run");
+    await using screen = await renderTimeline([message("Build it", { runId }, "question")], {
+      isWorking: true,
+      activeTurnStartedAt: CREATED_AT,
+      latestRun: { runId, status: "running", startedAt: CREATED_AT, completedAt: null },
+      backgroundCommands: [
+        { taskId: "build", label: "pnpm build" },
+        { taskId: "test", label: "pnpm test" },
+      ],
+    });
+    await vi.waitFor(() => expect(screen.text()).toContain("2 commands running"));
+    await click(screen.button(/2 commands running/));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("pnpm test"));
+  });
+
   it("keeps following a streaming turn after a heading is expanded at the bottom", async () => {
     const props = { ...baseProps(), isWorking: true };
     const runId = RunId.make("live-run");

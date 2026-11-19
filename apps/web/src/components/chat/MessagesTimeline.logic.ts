@@ -574,6 +574,19 @@ type MessagesTimelineRowContent =
       runId: RunId;
       label: string;
       expanded: boolean;
+      elapsedMs?: number;
+      /** The user stopped this turn, so the row is news rather than routine. */
+      stopped?: true;
+    }
+  | {
+      /** Routine rows between two answers (finished turns, background updates) folded into one line. */
+      kind: "quiet-fold";
+      id: string;
+      createdAt: string;
+      label: string;
+      expanded: boolean;
+      /** Turns folded inside, closed again when this fold closes. */
+      runIds: ReadonlyArray<RunId>;
     }
   | {
       kind: "attempt-fold";
@@ -747,6 +760,8 @@ interface TurnFold {
   /** Every entry in the segment, including the cards a fold never hides. */
   entryIds: ReadonlySet<string>;
   label: string;
+  elapsedMs: number | null;
+  stopped: boolean;
 }
 
 interface SupersededAttemptFold {
@@ -1237,6 +1252,8 @@ function deriveTurnFolds(input: {
       hiddenEntryIds: segmentHiddenIds(firstSegment),
       entryIds: new Set(firstSegment.map((entry) => entry.id)),
       label,
+      elapsedMs,
+      stopped: isLatestInterruptedTurn,
     });
     for (const [index, { startIndex, steer }] of group.steerSegments.entries()) {
       const entries = group.entries.slice(startIndex, group.steerSegments[index + 1]?.startIndex);
@@ -1254,6 +1271,8 @@ function deriveTurnFolds(input: {
         hiddenEntryIds: segmentHiddenIds(entries),
         entryIds: new Set(entries.map((entry) => entry.id)),
         label: segmentMs !== null ? `Continued for ${formatDuration(segmentMs)}` : "Continued",
+        elapsedMs: segmentMs,
+        stopped: false,
       });
     }
   }
@@ -1914,6 +1933,8 @@ export function deriveMessagesTimelineRows(input: {
         runId: turnFold.runId,
         label: turnFold.label,
         expanded: input.expandedRunIds?.has(turnFold.runId) ?? false,
+        ...(turnFold.elapsedMs !== null ? { elapsedMs: turnFold.elapsedMs } : {}),
+        ...(turnFold.stopped ? { stopped: true as const } : {}),
       });
     }
 
@@ -2728,6 +2749,15 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       );
     }
 
+    case "quiet-fold": {
+      const bf = b as typeof a;
+      return (
+        a.createdAt === bf.createdAt &&
+        a.label === bf.label &&
+        a.expanded === bf.expanded &&
+        a.runIds.join() === bf.runIds.join()
+      );
+    }
     case "attempt-fold":
     case "turn-fold": {
       const bf = b as typeof a;
@@ -2737,6 +2767,9 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.createdAt === bf.createdAt &&
         a.label === bf.label &&
         a.expanded === bf.expanded &&
+        (a.kind !== "turn-fold" ||
+          bf.kind !== "turn-fold" ||
+          (a.elapsedMs === bf.elapsedMs && a.stopped === bf.stopped)) &&
         anchors.length === nextAnchors.length &&
         anchors.every((id, index) => id === nextAnchors[index])
       );

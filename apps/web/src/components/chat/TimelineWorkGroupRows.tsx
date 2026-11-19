@@ -35,6 +35,7 @@ import { type TimestampFormat } from "@t3tools/contracts/settings";
 import {
   TimelineRowCtx,
   TimelineRowActivityCtx,
+  type BackgroundCommandsList,
   WorkGroupViewCtx,
   type WorkGroupViewedImage,
   type TimelineWorkEntry,
@@ -345,7 +346,7 @@ function ExpandedWorkGroupEntries({
 const workEntryKey = (entry: TimelineWorkEntry) => entry.id;
 
 export function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
-  const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup } =
+  const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup, backgroundCommands } =
     use(TimelineRowActivityCtx);
   const compacting = row.compacting === true || isCompacting;
   const shimmer = isPreparingWorktree || compacting;
@@ -370,11 +371,42 @@ export function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
           {label}
           {shimmer ? <ActivityShimmerOverlay>{label}</ActivityShimmerOverlay> : null}
         </span>
+        {backgroundCommands.length > 0 && !shimmer ? (
+          <BackgroundCommandsChip commands={backgroundCommands} />
+        ) : null}
         {backgroundWorktreeSetup ? (
           <BackgroundWorktreeSetupChip snapshot={backgroundWorktreeSetup} />
         ) : null}
       </div>
     </div>
+  );
+}
+
+/** One line for every background command, kept current, instead of a row per command. */
+function BackgroundCommandsChip({ commands }: { commands: BackgroundCommandsList }) {
+  const count = `${commands.length} ${commands.length === 1 ? "command" : "commands"} running`;
+  return (
+    <Popover>
+      <PopoverTrigger
+        render={
+          <button
+            type="button"
+            className="min-w-0 cursor-pointer truncate rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+          />
+        }
+      >
+        · {count}
+      </PopoverTrigger>
+      <PopoverPopup side="bottom" align="start" width="lg" padding="compact">
+        <ul className="space-y-1.5 text-xs">
+          {commands.map((command) => (
+            <li key={command.taskId} className="font-mono whitespace-pre-wrap break-words">
+              {command.label}
+            </li>
+          ))}
+        </ul>
+      </PopoverPopup>
+    </Popover>
   );
 }
 
