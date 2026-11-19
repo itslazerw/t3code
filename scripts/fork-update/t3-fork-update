@@ -178,17 +178,44 @@ def build_and_assemble(official, out):
        timeout=1800)
 
 
+
+def make_inert(home):
+    """The test start must never run real agents: a copy of his data would resume his chats."""
+    p = f"{home}/userdata/settings.json"
+    try:
+        d = json.load(open(p))
+    except (FileNotFoundError, ValueError):
+        d = {}
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "binaryPath":
+                    o[k] = "/usr/bin/false"
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(d)
+    d["continueThreadsAfterServerUpdate"] = False
+    d["keepAwakeWhileAgentsWork"] = False
+    d["enableProviderUpdateChecks"] = False
+    json.dump(d, open(p, "w"), indent=2)
+
 def smoke(app):
     """The built app's server must start on a copy of your data within 90 seconds."""
     home = tempfile.mkdtemp(dir=ROOT, prefix=".smoke-")
     os.makedirs(f"{home}/userdata")
     if os.path.exists(f"{USERDATA}/statev2.sqlite"):
         sh(["sqlite3", f"{USERDATA}/statev2.sqlite", f".backup '{home}/userdata/statev2.sqlite'"])
+    if os.path.exists(f"{USERDATA}/settings.json"):
+        shutil.copy(f"{USERDATA}/settings.json", f"{home}/userdata/settings.json")
     exe = sh(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleExecutable", f"{app}/Contents/Info.plist"]).stdout.strip()
+    make_inert(home)
     out = open(f"{home}/server.log", "w")
     p = subprocess.Popen([f"{app}/Contents/MacOS/{exe}", f"{app}/Contents/Resources/app.asar/apps/server/dist/bin.mjs",
                           "serve", "--mode", "web", "--base-dir", home, "--port", "17790", "--host", "127.0.0.1",
-                          "--no-browser"], env=dict(os.environ, ELECTRON_RUN_AS_NODE="1"), stdout=out,
+                          "--no-browser"], env=dict(os.environ, ELECTRON_RUN_AS_NODE="1", PATH="/usr/bin:/bin:/usr/sbin:/sbin"), stdout=out,
                          stderr=subprocess.STDOUT)
     ok = False
     try:
