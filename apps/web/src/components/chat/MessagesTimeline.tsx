@@ -1225,7 +1225,12 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const listHeader = (
     <>
       {parentThreadLink === null ? listHeaderLeadingContent : null}
-      {historyControls ? <TimelineHistoryControl {...historyControls} /> : null}
+      {historyControls ? (
+        <TimelineHistoryControl
+          {...historyControls}
+          getScrollRoot={() => listRef.current?.getScrollableNode() ?? null}
+        />
+      ) : null}
       {parentThreadLink !== null ? listHeaderLeadingContent : null}
     </>
   );
@@ -1505,7 +1510,52 @@ const ConversationTimeline = memo(function ConversationTimeline({
   );
 });
 
-function TimelineHistoryControl(props: MessagesTimelineHistoryControls) {
+// How far above the top earlier turns start loading, so scrolling up rarely waits.
+const AUTO_LOAD_EARLIER_MARGIN_PX = 600;
+
+function TimelineHistoryControl(
+  props: MessagesTimelineHistoryControls & { getScrollRoot: () => HTMLElement | null },
+) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const onLoadEarlier = useEffectEvent(() => props.onLoadEarlier());
+  const getScrollRoot = useEffectEvent(() => props.getScrollRoot());
+  const canAutoLoad = props.hasMoreHistory && !props.loading && props.error === null;
+  // Scrolling up near the top loads earlier turns by itself; the button stays for keyboards.
+  // Only after the user scrolls up, so opening a thread (or a short one) never loads on its own.
+  // The list keeps the visible rows in place when turns are prepended, so the view does not jump.
+  // After each load it waits for the next scroll up, so it never loops on its own.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- IntersectionObserver on the button loads earlier turns while scrolling up
+  useEffect(() => {
+    const button = buttonRef.current;
+    const root = getScrollRoot();
+    if (!canAutoLoad || !button || !root || typeof IntersectionObserver === "undefined") return;
+    let lastTop = root.scrollTop;
+    let scrolledUp = false;
+    let near = false;
+    const maybeLoad = () => {
+      if (!near || !scrolledUp) return;
+      scrolledUp = false;
+      onLoadEarlier();
+    };
+    const onScroll = () => {
+      if (root.scrollTop < lastTop) scrolledUp = true;
+      lastTop = root.scrollTop;
+      maybeLoad();
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        near = entry?.isIntersecting ?? false;
+        maybeLoad();
+      },
+      { root, rootMargin: `${AUTO_LOAD_EARLIER_MARGIN_PX}px 0px 0px 0px` },
+    );
+    observer.observe(button);
+    root.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      observer.disconnect();
+      root.removeEventListener("scroll", onScroll);
+    };
+  }, [canAutoLoad]);
   if (!props.hasMoreHistory && props.error === null) {
     return null;
   }
@@ -1514,6 +1564,7 @@ function TimelineHistoryControl(props: MessagesTimelineHistoryControls) {
       <div className="chat-content-lane flex flex-col gap-1.5 pb-2">
         {props.hasMoreHistory ? (
           <button
+            ref={buttonRef}
             type="button"
             disabled={props.loading}
             aria-label="Load earlier turns"
