@@ -138,20 +138,22 @@ def fetch_official(ver):
 
 def fork_commits():
     """This fork's own commits: everything on the fork's branch after the release it sits on."""
-    branch = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO).stdout.strip()
-    sh(["git", "pull", "--quiet", "--ff-only"], cwd=REPO, check=False)
-    sh(["git", "fetch", "--quiet", "--tags", UPSTREAM], cwd=REPO)
-    base = sh(["git", "describe", "--tags", "--abbrev=0", "--match", "v*", branch], cwd=REPO).stdout.strip()
-    return sh(["git", "rev-list", "--reverse", f"{base}..{branch}"], cwd=REPO).stdout.split()
+    if sh(["git", "pull", "--quiet", "--ff-only"], cwd=REPO, check=False).returncode != 0:
+        log("could not pull the fork's newest commits; building from this checkout as it is")
+    sh(["git", "fetch", "--quiet", "--tags", UPSTREAM, "+refs/heads/main:refs/t3-upstream/main"], cwd=REPO)
+    # Anything upstream has (its main branch or a release tag) is not a fork change.
+    return sh(["git", "rev-list", "--reverse", "HEAD", "--not", "refs/t3-upstream/main", "--tags"],
+              cwd=REPO).stdout.split()
 
 
 def apply_commits(ver):
+    commits = fork_commits()  # also fetches the release tags the worktree below needs
     if not os.path.isdir(SRC):
         sh(["git", "worktree", "add", "--detach", SRC, f"v{ver}"], cwd=REPO)
     sh(["git", "cherry-pick", "--abort"], cwd=SRC, check=False)
     sh(["git", "checkout", "--quiet", "--detach", f"v{ver}"], cwd=SRC)
     applied, dropped = [], []
-    for c in fork_commits():
+    for c in commits:
         subject = sh(["git", "log", "-1", "--format=%s", c], cwd=REPO).stdout.strip()
         if sh(["git", "cherry-pick", "--allow-empty", c], cwd=SRC, check=False).returncode == 0:
             applied.append(subject)
@@ -236,12 +238,13 @@ def prepare(ver):
 
 
 def backup_userdata():
-    if not os.path.exists(f"{USERDATA}/statev2.sqlite"):
+    if not os.path.isdir(USERDATA):
         return
     dest = f"{ROOT}/backups/userdata-{dt.datetime.now():%Y%m%d-%H%M%S}"
     os.makedirs(dest)
-    sh(["sqlite3", f"{USERDATA}/statev2.sqlite", f".backup '{dest}/statev2.sqlite'"])
-    sh(["rsync", "-a", "--exclude", "statev2.sqlite*", "--exclude", "logs", f"{USERDATA}/", f"{dest}/"])
+    for db in glob.glob(f"{USERDATA}/*.sqlite"):  # a safe copy even while T3 writes to it
+        sh(["sqlite3", db, f".backup '{dest}/{os.path.basename(db)}'"])
+    sh(["rsync", "-a", "--exclude", "*.sqlite*", "--exclude", "logs", f"{USERDATA}/", f"{dest}/"])
     for old in sorted(glob.glob(f"{ROOT}/backups/userdata-*"))[:-KEEP_BACKUPS]:
         shutil.rmtree(old, ignore_errors=True)
     log(f"T3 data backed up to {dest}")
@@ -256,12 +259,19 @@ def install(path, kind):
     os.makedirs(os.path.dirname(prev), exist_ok=True)
     if os.path.exists(APP):
         sh(["ditto", APP, prev])
-    tmp = APP + ".t3-fork-new"
+    tmp, old = APP + ".t3-fork-new", APP + ".t3-fork-old"
     shutil.rmtree(tmp, ignore_errors=True)
+    shutil.rmtree(old, ignore_errors=True)
     sh(["ditto", path, tmp])
     if os.path.exists(APP):
-        shutil.rmtree(APP)
-    os.rename(tmp, APP)
+        os.rename(APP, old)
+    try:
+        os.rename(tmp, APP)
+    except OSError:
+        if os.path.exists(old):
+            os.rename(old, APP)  # put the app that was there back
+        raise
+    shutil.rmtree(old, ignore_errors=True)
     log(f"installed {kind} {app_version(APP)} (the one before is kept in {prev})")
 
 
@@ -288,11 +298,11 @@ def swap():
 
 
 def busy_chats():
-    """Chats working right now, read from T3's own database."""
+    """Chats working right now, read from T3's own database (a run stuck for over 6 hours is ignored)."""
     q = ("select t.title from orchestration_v2_projection_runs r join orchestration_v2_projection_threads t "
          "on t.thread_id = r.thread_id where json_extract(r.payload_json, '$.status') in "
          "('preparing','starting','running','waiting') and json_extract(t.payload_json, '$.updatedAt') > "
-         "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes')")
+         "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-6 hours')")
     r = subprocess.run(["sqlite3", "-readonly", f"{USERDATA}/statev2.sqlite", q], capture_output=True, text=True)
     return sorted(set(line for line in r.stdout.splitlines() if line.strip()))
 

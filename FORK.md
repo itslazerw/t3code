@@ -23,9 +23,11 @@ git clone https://github.com/itslazerw/t3code.git ~/t3-fork
 ~/t3-fork/scripts/fork-update/t3-fork-update check --force
 ```
 
-That downloads the official release, checks Apple's signature, adds the changes, builds, tests it on
-a copy of your data, and puts it in place the next time T3 is closed. To do it right away:
-`t3-fork-update restart` (it won't quit T3 while a chat is working).
+That downloads the official release, checks Apple's signature, adds the changes, builds, and tests
+it on a copy of your data. If T3 is closed it goes in right away; if T3 is open it waits for the next
+check after you close it. To swap it in now, run
+`~/t3-fork/scripts/fork-update/t3-fork-update restart` (it quits and reopens T3, and won't while a
+chat is working).
 
 ## Updates
 
@@ -34,7 +36,7 @@ releases a new version, the script builds it with these changes. If one of them 
 new version, it's left out and you get a Mac notification saying which. If the build fails, you get
 the plain official release, so you never fall behind.
 
-Your T3 data is backed up before every swap (the newest 2 are kept).
+Your T3 data (the `~/.t3/userdata` folder) is backed up before every swap; the newest 2 are kept.
 
 ## Going back
 
