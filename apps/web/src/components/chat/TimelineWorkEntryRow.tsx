@@ -70,7 +70,9 @@ import {
   THINKING_PREVIEW_PLUGINS,
   THOUGHT_PREVIEW_PLUGINS,
   THOUGHT_PREVIEW_SOURCE_MAX_LENGTH,
+  workEntryInitiallyExpanded,
 } from "./TimelineWorkEntryRow.logic";
+import { useUiStateStore } from "../../uiStateStore";
 
 export function useThreadReadTarget(entry: TimelineWorkEntry, environmentId: EnvironmentId) {
   const rawThreadId = threadReadTargetId(entry);
@@ -130,7 +132,7 @@ export function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<Time
       {entries.map((entry) => (
         <ChatMarkdown
           key={entry.id}
-          className="text-foreground"
+          className="text-xs text-muted-foreground"
           text={entry.detail ?? ""}
           cwd={ctx.markdownCwd}
           threadRef={ctx.threadRef ?? undefined}
@@ -222,8 +224,15 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       ? notificationChildThreadId(workEntry.projectedItem.item.source)
       : undefined;
   const groupView = use(WorkGroupViewCtx);
-  const [expanded, setExpanded] = useState(
-    () => groupView?.state.expandedEntries.has(workEntry.id) ?? false,
+  const isReasoning = workEntry.itemType === "reasoning";
+  const thinkingExpanded = useUiStateStore((store) => store.thinkingExpanded);
+  const setThinkingExpanded = useUiStateStore((store) => store.setThinkingExpanded);
+  const [expanded, setExpanded] = useState(() =>
+    workEntryInitiallyExpanded({
+      isReasoning,
+      openedBefore: groupView?.state.expandedEntries.has(workEntry.id) ?? false,
+      thinkingExpanded,
+    }),
   );
   const onInitialOutputReady = () => {
     if (groupView) groupView.onContentReady?.(workEntry.id);
@@ -231,6 +240,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
   };
   const toggleExpanded = () => {
     const next = !expanded;
+    if (isReasoning) setThinkingExpanded(next);
     if (groupView) {
       groupView.onToggleEntry(!next, workEntry.id);
       if (next) groupView.state.expandedEntries.add(workEntry.id);
@@ -324,7 +334,6 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
     showWarningIndicator || showDestructiveRowStyle
       ? undefined
       : (workEntry.toolIcon ?? workEntry.toolSource?.icon);
-  const isReasoning = workEntry.itemType === "reasoning";
   const questionHeading = workEntry.questionAnswer
     ? getQuestionTextPreview(workEntry.questionAnswer)
     : "";

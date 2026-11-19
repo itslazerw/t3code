@@ -33,6 +33,7 @@ export interface PersistedUiState {
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
+  thinkingExpanded?: boolean;
 }
 
 export interface UiProjectState {
@@ -56,8 +57,13 @@ export interface UiPullRequestState {
   pullRequestMergeMethod: PullRequestMergeMethod;
 }
 
+export interface UiTimelineState {
+  /** Thinking opens or stays folded the way the user last left one. */
+  thinkingExpanded: boolean;
+}
+
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState {}
+  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState, UiTimelineState {}
 
 const initialState: UiState = {
   projectExpandedById: {},
@@ -68,6 +74,7 @@ const initialState: UiState = {
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
   pullRequestMergeMethod: "merge",
+  thinkingExpanded: false,
 };
 
 const LEGACY_PROJECT_CWD_PREFERENCE_PREFIX = "legacy-project-cwd:";
@@ -161,6 +168,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
       ? parsed.pullRequestMergeMethod
       : initialState.pullRequestMergeMethod,
+    thinkingExpanded: parsed.thinkingExpanded === true,
   };
 }
 
@@ -236,6 +244,7 @@ export function persistState(state: UiState): void {
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
+        thinkingExpanded: state.thinkingExpanded,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -438,6 +447,7 @@ interface UiStateStore extends UiState {
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   setProjectOrder: (projectOrder: readonly string[]) => void;
   markProjectStripSeeded: () => void;
+  setThinkingExpanded: (expanded: boolean) => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
     draggedProjectIds: readonly string[],
@@ -462,6 +472,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setProjectExpanded(state, projectIds, expanded)),
   setProjectOrder: (projectOrder) => set({ projectOrder: [...projectOrder] }),
   markProjectStripSeeded: () => set({ projectStripSeeded: true }),
+  setThinkingExpanded: (expanded) => set({ thinkingExpanded: expanded }),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>
     set((state) =>
       reorderProjects(state, currentProjectOrder, draggedProjectIds, targetProjectIds),

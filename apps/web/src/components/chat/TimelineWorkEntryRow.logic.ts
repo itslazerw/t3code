@@ -267,3 +267,12 @@ export function remarkThoughtPreview(fallback: string) {
 
 export const THOUGHT_PREVIEW_PLUGINS: PluggableList = [[remarkThoughtPreview, "Thought"]];
 export const THINKING_PREVIEW_PLUGINS: PluggableList = [[remarkThoughtPreview, "Thinking"]];
+
+/** Thinking opens the way the user last left one; other rows open only when opened before. */
+export function workEntryInitiallyExpanded(input: {
+  readonly isReasoning: boolean;
+  readonly openedBefore: boolean;
+  readonly thinkingExpanded: boolean;
+}): boolean {
+  return input.openedBefore || (input.isReasoning && input.thinkingExpanded);
+}

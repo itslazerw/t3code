@@ -91,6 +91,7 @@ export interface TimelineRowSharedState {
     | ((input: { readonly sourceThreadId: ThreadId; readonly runId: RunId }) => Promise<void>)
     | undefined;
   onToggleTurnFold: (runId: RunId) => void;
+  onToggleThinkingGroup: (groupId: string, anchorKey: string, expanded: boolean) => void;
   onToggleQuietFold: (row: Extract<MessagesTimelineRow, { kind: "quiet-fold" }>) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;

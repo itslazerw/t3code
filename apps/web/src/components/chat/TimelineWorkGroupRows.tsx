@@ -705,7 +705,11 @@ export function WorkGroupToggleTimelineRow({
       expanded={row.expanded}
       createdAt={row.createdAt}
       timestampFormat={ctx.timestampFormat}
-      onToggle={() => ctx.onToggleWorkGroup(row.groupId, row.id)}
+      onToggle={() =>
+        row.summaryKind === "reasoning"
+          ? ctx.onToggleThinkingGroup(row.groupId, row.id, row.expanded)
+          : ctx.onToggleWorkGroup(row.groupId, row.id)
+      }
     />
   );
 }

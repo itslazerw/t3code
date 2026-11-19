@@ -1967,6 +1967,39 @@ describe("deriveMessagesTimelineRows", () => {
     });
   });
 
+  it.each([false, true])("opens finished thinking when last left open: %s", (thinkingExpanded) => {
+    const thought = (id: string, at: string) => ({
+      id: `${id}-entry`,
+      kind: "work" as const,
+      createdAt: at,
+      entry: {
+        id,
+        createdAt: at,
+        runId: "turn-1" as never,
+        label: id,
+        itemType: "reasoning" as const,
+        detail: id,
+        tone: "thinking" as const,
+        toolLifecycleStatus: "completed" as const,
+      },
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        thought("first", "2026-01-01T00:00:01Z"),
+        thought("second", "2026-01-01T00:00:02Z"),
+      ],
+      thinkingExpanded,
+      expandedRunIds: new Set(["turn-1" as never]),
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(rows.find((row) => row.kind === "work-toggle")).toMatchObject({
+      summaryKind: "reasoning",
+      expanded: thinkingExpanded,
+    });
+  });
+
   it("keeps an actually running tool in the shared activity row", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [

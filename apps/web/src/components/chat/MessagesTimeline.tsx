@@ -91,6 +91,7 @@ import {
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
 import { dedupeSubagentRows, foldQuietTimelineRows } from "./TimelineQuietRows.logic";
+import { useUiStateStore } from "../../uiStateStore";
 import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
 import { TooltipScrollDismissArea } from "../ui/tooltip";
@@ -434,6 +435,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     ...timelineListStateFor(listIdentityKey),
     findOpenAtOpening: findOpen,
   }));
+  const thinkingExpanded = useUiStateStore((store) => store.thinkingExpanded);
+  const setThinkingExpanded = useUiStateStore((store) => store.setThinkingExpanded);
   const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(
     () => listState.rememberedPosition?.disclosures?.runs ?? new Set(),
   );
@@ -606,6 +609,20 @@ const ConversationTimeline = memo(function ConversationTimeline({
       return next;
     });
   };
+  // Finished thinking follows the user's last choice everywhere, so it is not kept per group.
+  const onToggleThinkingGroup = (groupId: string, anchorKey: string, expanded: boolean) => {
+    preserveDisclosurePosition(
+      anchorKey,
+      expanded ? undefined : { contentKey: `${groupId}:details` },
+    );
+    setThinkingExpanded(!expanded);
+    setExpandedWorkGroupIds((existing) => {
+      if (!existing.has(groupId)) return existing;
+      const next = new Set(existing);
+      next.delete(groupId);
+      return next;
+    });
+  };
   const onToggleAttemptFold = (attemptId: RunAttemptId) => {
     preserveDisclosurePosition(`attempt-fold:${attemptId}`);
     setExpandedAttemptIds((existing) => {
@@ -767,6 +784,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     expandedRunIds: visibleExpandedRunIds,
     expandedAttemptIds: visibleExpandedAttemptIds,
     expandedWorkGroupIds,
+    thinkingExpanded,
     isWorking,
     runlessWorkActive,
     activeTurnStartedAt,
@@ -1158,6 +1176,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     onForkFromRun,
     onToggleTurnFold,
     onToggleQuietFold,
+    onToggleThinkingGroup,
     onToggleAttemptFold,
     onToggleWorkGroup,
     onToggleWorkEntry: (anchorKey, collapsed, entryId) =>

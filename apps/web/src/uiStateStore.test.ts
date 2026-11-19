@@ -25,6 +25,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadChangedFilesExpandedById: {},
     defaultAdvertisedEndpointKey: null,
     pullRequestMergeMethod: "merge",
+    thinkingExpanded: false,
     ...overrides,
   };
 }
@@ -129,6 +130,7 @@ describe("parsePersistedState", () => {
       sidebarProjectScopeKeys: [],
       projectStripSeeded: false,
       pullRequestMergeMethod: "merge",
+      thinkingExpanded: false,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
           "turn-1": false,
@@ -136,6 +138,11 @@ describe("parsePersistedState", () => {
         },
       },
     });
+  });
+
+  it("folds thinking for new users and keeps the last toggle", () => {
+    expect(parsePersistedState({}).thinkingExpanded).toBe(false);
+    expect(parsePersistedState({ thinkingExpanded: true }).thinkingExpanded).toBe(true);
   });
 
   it("keeps a persisted fast-forward merge method", () => {
@@ -222,6 +229,7 @@ describe("uiStateStore persistence", () => {
         },
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
+      thinkingExpanded: true,
     });
 
     persistState(state);
@@ -249,6 +257,7 @@ describe("uiStateStore persistence", () => {
         },
       },
       pullRequestMergeMethod: "merge",
+      thinkingExpanded: true,
     });
     expect(parsePersistedState(persisted)).toEqual({
       ...state,
